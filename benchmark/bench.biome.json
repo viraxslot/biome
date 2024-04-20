@@ -5,32 +5,36 @@
 		"rules": {
 			"recommended": false,
 			"complexity": {
-				"noExtraBooleanCast": "error"
+				"noExtraBooleanCast": "error",
+				"noMultipleSpacesInRegularExpressionLiterals": "error"
 			},
-			"correctness": {
+			"performance": {
+				"noDelete": "error"
+			},
+			"style": {
 				"noArguments": "error",
+				"noRestrictedGlobals": "error"
+			},
+			"suspicious": {
 				"noAsyncPromiseExecutor": "error",
 				"noCatchAssign": "error",
 				"noCompareNegZero": "error",
 				"noDebugger": "error",
-				"noDelete": "error",
 				"noDoubleEquals": "error",
 				"noDuplicateParameters": "error",
-				"noEmptyPattern": "error",
 				"noFunctionAssign": "error",
 				"noImportAssign": "error",
 				"noLabelVar": "error",
-				"noMultipleSpacesInRegularExpressionLiterals": "error",
-				"noNewSymbol": "error",
-				"noRestrictedGlobals": "error",
 				"noShadowRestrictedNames": "error",
 				"noSparseArray": "error",
-				"noUnreachable": "error",
 				"noUnsafeNegation": "error",
-				"noUnusedVariables": "error",
 				"useValidTypeof": "error"
 			},
-			"nursery": {
+			"correctness": {
+				"noEmptyPattern": "error",
+				"noNewSymbol": "error",
+				"noUnreachable": "error",
+				"noUnusedVariables": "error",
 				"noConstAssign": "warn",
 				"useValidForDirection": "warn"
 			}

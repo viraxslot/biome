@@ -42,7 +42,8 @@ declare_rule! {
     pub NoRedundantAlt {
         version: "1.0.0",
         name: "noRedundantAlt",
-        sources: &[RuleSource::EslintJsxA11y("no-redundant-roles")],
+        language: "jsx",
+        sources: &[RuleSource::EslintJsxA11y("img-redundant-alt")],
         recommended: true,
     }
 }

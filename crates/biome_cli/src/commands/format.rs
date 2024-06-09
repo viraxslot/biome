@@ -3,6 +3,7 @@ use crate::commands::{
     get_files_to_process, get_stdin, resolve_manifest, validate_configuration_diagnostics,
 };
 use crate::diagnostics::DeprecatedArgument;
+use crate::execute::VcsTargeted;
 use crate::{
     execute_mode, setup_cli_subscriber, CliDiagnostic, CliSession, Execution, TraversalMode,
 };
@@ -17,8 +18,10 @@ use biome_diagnostics::PrintDiagnostic;
 use biome_service::configuration::{
     load_configuration, LoadedConfiguration, PartialConfigurationExt,
 };
-use biome_service::workspace::UpdateSettingsParams;
+use biome_service::workspace::{RegisterProjectFolderParams, UpdateSettingsParams};
 use std::ffi::OsString;
+
+use super::check_fix_incompatible_arguments;
 
 pub(crate) struct FormatCommandPayload {
     pub(crate) javascript_formatter: Option<PartialJavascriptFormatter>,
@@ -29,6 +32,7 @@ pub(crate) struct FormatCommandPayload {
     pub(crate) files_configuration: Option<PartialFilesConfiguration>,
     pub(crate) stdin_file_path: Option<String>,
     pub(crate) write: bool,
+    pub(crate) fix: bool,
     pub(crate) cli_options: CliOptions,
     pub(crate) paths: Vec<OsString>,
     pub(crate) staged: bool,
@@ -50,13 +54,22 @@ pub(crate) fn format(
         stdin_file_path,
         files_configuration,
         write,
+        fix,
         mut json_formatter,
-        mut css_formatter,
+        css_formatter,
         since,
         staged,
         changed,
     } = payload;
     setup_cli_subscriber(cli_options.log_level, cli_options.log_kind);
+
+    check_fix_incompatible_arguments(super::FixFileModeOptions {
+        apply: false,
+        apply_unsafe: false,
+        write,
+        fix,
+        unsafe_: false,
+    })?;
 
     let loaded_configuration =
         load_configuration(&session.app.fs, cli_options.as_configuration_path_hint())?;
@@ -65,12 +78,34 @@ pub(crate) fn format(
         session.app.console,
         cli_options.verbose,
     )?;
+    // let fs = &session.app.fs;
+    // let (editorconfig, editorconfig_diagnostics) = {
+    //     let search_path = loaded_configuration
+    //         .directory_path
+    //         .clone()
+    //         .unwrap_or_else(|| fs.working_directory().unwrap_or_default());
+    //     load_editorconfig(fs, search_path)?
+    // };
+    // for diagnostic in editorconfig_diagnostics {
+    //     session.app.console.error(markup! {
+    //         {PrintDiagnostic::simple(&diagnostic)}
+    //     })
+    // }
+
     resolve_manifest(&session)?;
     let LoadedConfiguration {
         mut configuration,
         directory_path: configuration_path,
         ..
     } = loaded_configuration;
+    // let mut configuration = if let Some(mut configuration) = editorconfig {
+    //     // this makes biome configuration take precedence over editorconfig configuration
+    //     configuration.merge_with(biome_configuration);
+    //     configuration
+    // } else {
+    //     biome_configuration
+    // };
+
     // TODO: remove in biome 2.0
     let console = &mut *session.app.console;
     if let Some(config) = formatter_configuration.as_mut() {
@@ -82,7 +117,9 @@ pub(crate) fn format(
                 {PrintDiagnostic::simple(&diagnostic)}
             });
 
-            config.indent_width = Some(indent_size);
+            if config.indent_width.is_none() {
+                config.indent_width = Some(indent_size);
+            }
         }
     }
     // TODO: remove in biome 2.0
@@ -95,7 +132,22 @@ pub(crate) fn format(
                 {PrintDiagnostic::simple(&diagnostic)}
             });
 
-            js_formatter.indent_width = Some(indent_size);
+            if js_formatter.indent_width.is_none() {
+                js_formatter.indent_width = Some(indent_size);
+            }
+        }
+
+        if let Some(trailing_comma) = js_formatter.trailing_comma {
+            let diagnostic = DeprecatedArgument::new(markup! {
+                "The argument "<Emphasis>"--trailing-comma"</Emphasis>" is deprecated, it will be removed in the next major release. Use "<Emphasis>"--trailing-commas"</Emphasis>" instead."
+            });
+            console.error(markup! {
+                {PrintDiagnostic::simple(&diagnostic)}
+            });
+
+            if js_formatter.trailing_commas.is_none() {
+                js_formatter.trailing_commas = Some(trailing_comma);
+            }
         }
     }
     // TODO: remove in biome 2.0
@@ -108,28 +160,13 @@ pub(crate) fn format(
                 {PrintDiagnostic::simple(&diagnostic)}
             });
 
-            json_formatter.indent_width = Some(indent_size);
-        }
-    }
-    // TODO: remove in biome 2.0
-    if let Some(css_formatter) = css_formatter.as_mut() {
-        if let Some(indent_size) = css_formatter.indent_size {
-            let diagnostic = DeprecatedArgument::new(markup! {
-                "The argument "<Emphasis>"--css-formatter-indent-size"</Emphasis>" is deprecated, it will be removed in the next major release. Use "<Emphasis>"--css-formatter-indent-width"</Emphasis>" instead."
-            });
-            console.error(markup! {
-                {PrintDiagnostic::simple(&diagnostic)}
-            });
-
-            css_formatter.indent_width = Some(indent_size);
+            if json_formatter.indent_width.is_none() {
+                json_formatter.indent_width = Some(indent_size);
+            }
         }
     }
 
-    if css_formatter.is_some() {
-        let css = configuration.css.get_or_insert_with(Default::default);
-        css.formatter.merge_with(css_formatter);
-    }
-    configuration.files.merge_with(files_configuration);
+    // merge formatter options
     if !configuration
         .formatter
         .as_ref()
@@ -142,6 +179,10 @@ pub(crate) fn format(
 
         formatter.enabled = Some(true);
     }
+    if css_formatter.is_some() {
+        let css = configuration.css.get_or_insert_with(Default::default);
+        css.formatter.merge_with(css_formatter);
+    }
     if javascript_formatter.is_some() {
         let javascript = configuration
             .javascript
@@ -152,6 +193,8 @@ pub(crate) fn format(
         let json = configuration.json.get_or_insert_with(Default::default);
         json.formatter.merge_with(json_formatter);
     }
+
+    configuration.files.merge_with(files_configuration);
     configuration.vcs.merge_with(vcs_configuration);
 
     // check if support of git ignore files is enabled
@@ -168,8 +211,16 @@ pub(crate) fn format(
     session
         .app
         .workspace
+        .register_project_folder(RegisterProjectFolderParams {
+            path: session.app.fs.working_directory(),
+            set_as_current_workspace: true,
+        })?;
+
+    session
+        .app
+        .workspace
         .update_settings(UpdateSettingsParams {
-            working_directory: session.app.fs.working_directory(),
+            workspace_directory: session.app.fs.working_directory(),
             configuration,
             vcs_base_path,
             gitignore_matches,
@@ -179,8 +230,9 @@ pub(crate) fn format(
 
     let execution = Execution::new(TraversalMode::Format {
         ignore_errors: cli_options.skip_errors,
-        write,
+        write: write || fix,
         stdin,
+        vcs_targeted: VcsTargeted { staged, changed },
     })
     .set_report(&cli_options);
 

@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{inner_string_text, AnyJsImportSpecifierLike, JsSyntaxKind, JsSyntaxToken};
 use biome_rowan::BatchMutationExt;
 
@@ -29,6 +28,7 @@ declare_rule! {
     pub UseNodeAssertStrict {
         version: "1.6.0",
         name: "useNodeAssertStrict",
+        language: "js",
         recommended: false,
         fix_kind: FixKind::Safe,
     }
@@ -76,12 +76,11 @@ impl Rule for UseNodeAssertStrict {
         );
         let mut mutation = ctx.root().begin();
         mutation.replace_token(module_name.clone(), new_module_name);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! { "Replace with "<Emphasis>"node:assert/strict"</Emphasis>"." }
-                .to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Replace with "<Emphasis>"node:assert/strict"</Emphasis>"." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

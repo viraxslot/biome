@@ -3,7 +3,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{
     AnyJsCallArgument, AnyJsClass, AnyJsConstructorParameter, AnyJsFormalParameter,
     JsCallExpression, JsConstructorClassMember,
@@ -21,7 +20,7 @@ declare_rule! {
     /// The rule ignores:
     ///
     /// - decorated classes;
-    /// - constructors with at least one [parameter property](https://www.typescriptlang.org/docs/handbook/classes.html#parameter-properties);
+    /// - constructors with at least one [parameter property](https://www.typescriptlang.org/docs/handbook/2/classes.html#parameter-properties);
     /// - `private` and `protected` constructors.
     ///
     /// ## Caveat
@@ -118,6 +117,7 @@ declare_rule! {
     pub NoUselessConstructor {
         version: "1.0.0",
         name: "noUselessConstructor",
+        language: "js",
         sources: &[
             RuleSource::Eslint("no-useless-constructor"),
             RuleSource::EslintTypeScript("no-useless-constructor"),
@@ -212,12 +212,12 @@ impl Rule for NoUselessConstructor {
         let constructor = ctx.query();
         let mut mutation = ctx.root().begin();
         mutation.remove_node(constructor.clone());
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove the unnecessary constructor." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the unnecessary constructor." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

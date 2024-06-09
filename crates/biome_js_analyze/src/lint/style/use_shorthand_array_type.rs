@@ -2,10 +2,9 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
-    AnyTsType, JsSyntaxKind, JsSyntaxToken, TriviaPieceKind, TsReferenceType, TsTypeArguments, T,
+    AnyTsType, JsSyntaxKind, JsSyntaxToken, TsReferenceType, TsTypeArguments, T,
 };
 use biome_rowan::{AstNode, AstSeparatedList, BatchMutationExt, TriviaPiece};
 
@@ -51,6 +50,7 @@ declare_rule! {
     pub UseShorthandArrayType  {
         version: "1.0.0",
         name: "useShorthandArrayType",
+        language: "ts",
         recommended: false,
         deprecated: "Use `useConsistentArrayType` instead.",
         fix_kind: FixKind::Unsafe,
@@ -117,12 +117,12 @@ impl Rule for UseShorthandArrayType {
                         .to_owned()
                 }
             };
-            return Some(JsRuleAction {
-                category: ActionCategory::QuickFix,
-                applicability: Applicability::MaybeIncorrect,
+            return Some(JsRuleAction::new(
+                ActionCategory::QuickFix,
+                ctx.metadata().applicability(),
                 message,
                 mutation,
-            });
+            ));
         };
         None
     }
@@ -185,7 +185,7 @@ fn convert_to_array_type(
                             JsSyntaxKind::TS_READONLY_MODIFIER,
                             "readonly ",
                             [],
-                            [TriviaPiece::new(TriviaPieceKind::Whitespace, 1)],
+                            [TriviaPiece::whitespace(1)],
                         );
 
                         // Modify `ReadonlyArray<ReadonlyArray<T>>` to `readonly (readonly T[])[]`
@@ -236,11 +236,7 @@ fn convert_to_array_type(
             length => {
                 let ts_union_type_builder = make::ts_union_type(make::ts_union_type_variant_list(
                     types_array,
-                    (0..length - 1).map(|_| {
-                        make::token(T![|])
-                            .with_leading_trivia([(TriviaPieceKind::Whitespace, " ")])
-                            .with_trailing_trivia([(TriviaPieceKind::Whitespace, " ")])
-                    }),
+                    (0..length - 1).map(|_| make::token_decorated_with_space(T![|])),
                 ));
                 return Some(AnyTsType::TsUnionType(ts_union_type_builder.build()));
             }

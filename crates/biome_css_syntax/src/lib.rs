@@ -12,7 +12,7 @@ pub use file_source::CssFileSource;
 pub use syntax_node::*;
 
 use crate::CssSyntaxKind::*;
-use biome_rowan::{AstNode, RawSyntaxKind};
+use biome_rowan::{AstNode, RawSyntaxKind, SyntaxKind};
 
 impl From<u16> for CssSyntaxKind {
     fn from(d: u16) -> CssSyntaxKind {
@@ -28,16 +28,6 @@ impl From<CssSyntaxKind> for u16 {
 }
 
 impl CssSyntaxKind {
-    pub fn is_trivia(self) -> bool {
-        matches!(
-            self,
-            CssSyntaxKind::NEWLINE
-                | CssSyntaxKind::WHITESPACE
-                | CssSyntaxKind::COMMENT
-                | CssSyntaxKind::MULTILINE_COMMENT
-        )
-    }
-
     /// Returns `true` for any contextual or non-contextual keyword
     #[inline]
     pub const fn is_keyword(self) -> bool {
@@ -103,6 +93,8 @@ impl biome_rowan::SyntaxKind for CssSyntaxKind {
                 | CSS_BOGUS_PROPERTY
                 | CSS_BOGUS_PROPERTY_VALUE
                 | CSS_BOGUS_DOCUMENT_MATCHER
+                | CSS_BOGUS_KEYFRAMES_NAME
+                | CSS_BOGUS_CUSTOM_IDENTIFIER
         )
     }
 
@@ -124,6 +116,12 @@ impl biome_rowan::SyntaxKind for CssSyntaxKind {
             kind if AnyCssKeyframesItem::can_cast(*kind) => CSS_BOGUS_KEYFRAMES_ITEM,
             kind if AnyCssProperty::can_cast(*kind) => CSS_BOGUS_PROPERTY,
             kind if AnyCssDocumentMatcher::can_cast(*kind) => CSS_BOGUS_DOCUMENT_MATCHER,
+            kind if AnyCssKeyframesName::can_cast(*kind) => CSS_BOGUS_KEYFRAMES_NAME,
+            kind if AnyCssCustomIdentifier::can_cast(*kind) => CSS_BOGUS_CUSTOM_IDENTIFIER,
+            kind if AnyCssDeclarationOrAtRuleBlock::can_cast(*kind) => CSS_BOGUS_BLOCK,
+            kind if AnyCssDeclarationOrRuleBlock::can_cast(*kind) => CSS_BOGUS_BLOCK,
+            kind if AnyCssConditionalBlock::can_cast(*kind) => CSS_BOGUS_BLOCK,
+            kind if AnyCssFontFeatureValuesBlock::can_cast(*kind) => CSS_BOGUS_BLOCK,
 
             _ => CSS_BOGUS,
         }
@@ -146,6 +144,16 @@ impl biome_rowan::SyntaxKind for CssSyntaxKind {
     #[inline]
     fn is_list(&self) -> bool {
         CssSyntaxKind::is_list(*self)
+    }
+
+    fn is_trivia(self) -> bool {
+        matches!(
+            self,
+            CssSyntaxKind::NEWLINE
+                | CssSyntaxKind::WHITESPACE
+                | CssSyntaxKind::COMMENT
+                | CssSyntaxKind::MULTILINE_COMMENT
+        )
     }
 
     fn to_string(&self) -> Option<&'static str> {

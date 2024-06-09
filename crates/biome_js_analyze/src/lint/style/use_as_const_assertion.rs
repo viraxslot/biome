@@ -4,7 +4,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     AnyJsExpression, AnyJsLiteralExpression, AnyTsName, AnyTsType, JsInitializerClause,
@@ -48,6 +47,7 @@ declare_rule! {
     pub UseAsConstAssertion {
         version: "1.3.0",
         name: "useAsConstAssertion",
+        language: "ts",
         sources: &[RuleSource::EslintTypeScript("prefer-as-const")],
         recommended: true,
         fix_kind: FixKind::Safe,
@@ -189,12 +189,12 @@ impl Rule for UseAsConstAssertion {
                 mutation.replace_node(previous_initializer.expression().ok()?, new_expr);
             }
         };
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! { "Replace with "<Emphasis>"as const"</Emphasis>"." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Replace with "<Emphasis>"as const"</Emphasis>"." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

@@ -41,8 +41,9 @@ declare_rule! {
     /// b { font: normal 14px/32px -apple-system, BlinkMacSystemFont, sans-serif; }
     /// ```
     pub NoDuplicateFontNames {
-        version: "next",
+        version: "1.8.0",
         name: "noDuplicateFontNames",
+        language: "css",
         recommended: true,
         sources: &[RuleSource::Stylelint("font-family-no-duplicate-names")],
     }
@@ -141,7 +142,7 @@ impl Rule for NoDuplicateFontNames {
                 rule_category!(),
                 span,
                 markup! {
-                    "Unexpected duplicate font name: "<Emphasis>{ state.value }</Emphasis>
+                    "Duplicate font names are redundant and unnecessary: "<Emphasis>{ state.value }</Emphasis>
                 },
             )
             .note(markup! {

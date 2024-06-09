@@ -31,7 +31,7 @@ use crate::commands::lint::LintCommandPayload;
 pub use crate::commands::{biome_command, BiomeCommand};
 pub use crate::logging::{setup_cli_subscriber, LoggingLevel};
 pub use diagnostics::CliDiagnostic;
-pub use execute::{execute_mode, Execution, TraversalMode};
+pub use execute::{execute_mode, Execution, TraversalMode, VcsTargeted};
 pub use panic::setup_panic_handler;
 pub use reporter::{DiagnosticsPayload, Reporter, ReporterVisitor, TraversalSummary};
 pub use service::{open_transport, SocketTransport};
@@ -76,11 +76,15 @@ impl<'app> CliSession<'app> {
             BiomeCommand::Rage(_, daemon_logs, formatter, linter) => {
                 commands::rage::rage(self, daemon_logs, formatter, linter)
             }
+            BiomeCommand::Clean => commands::clean::clean(self),
             BiomeCommand::Start(config_path) => commands::daemon::start(self, config_path),
             BiomeCommand::Stop => commands::daemon::stop(self),
             BiomeCommand::Check {
                 apply,
                 apply_unsafe,
+                write,
+                fix,
+                unsafe_,
                 cli_options,
                 configuration,
                 paths,
@@ -96,6 +100,9 @@ impl<'app> CliSession<'app> {
                 CheckCommandPayload {
                     apply_unsafe,
                     apply,
+                    write,
+                    fix,
+                    unsafe_,
                     cli_options,
                     configuration,
                     paths,
@@ -111,29 +118,45 @@ impl<'app> CliSession<'app> {
             BiomeCommand::Lint {
                 apply,
                 apply_unsafe,
+                write,
+                fix,
+                unsafe_,
                 cli_options,
                 linter_configuration,
                 paths,
+                only,
+                skip,
                 stdin_file_path,
                 vcs_configuration,
                 files_configuration,
                 staged,
                 changed,
                 since,
+                css_linter,
+                javascript_linter,
+                json_linter,
             } => commands::lint::lint(
                 self,
                 LintCommandPayload {
                     apply_unsafe,
                     apply,
+                    write,
+                    fix,
+                    unsafe_,
                     cli_options,
                     linter_configuration,
                     paths,
+                    only,
+                    skip,
                     stdin_file_path,
                     vcs_configuration,
                     files_configuration,
                     staged,
                     changed,
                     since,
+                    css_linter,
+                    javascript_linter,
+                    json_linter,
                 },
             ),
             BiomeCommand::Ci {
@@ -163,6 +186,7 @@ impl<'app> CliSession<'app> {
                 formatter_configuration,
                 stdin_file_path,
                 write,
+                fix,
                 cli_options,
                 paths,
                 vcs_configuration,
@@ -179,6 +203,7 @@ impl<'app> CliSession<'app> {
                     formatter_configuration,
                     stdin_file_path,
                     write,
+                    fix,
                     cli_options,
                     paths,
                     vcs_configuration,
@@ -196,8 +221,9 @@ impl<'app> CliSession<'app> {
             BiomeCommand::Migrate {
                 cli_options,
                 write,
+                fix,
                 sub_command,
-            } => commands::migrate::migrate(self, cli_options, write, sub_command),
+            } => commands::migrate::migrate(self, cli_options, write, fix, sub_command),
             BiomeCommand::Search {
                 cli_options,
                 files_configuration,

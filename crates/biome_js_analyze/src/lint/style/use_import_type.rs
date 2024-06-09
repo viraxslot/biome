@@ -8,7 +8,6 @@ use biome_analyze::{
     RuleDiagnostic, RuleSource, RuleSourceKind,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_semantic::{ReferencesExtensions, SemanticModel};
 use biome_js_syntax::{
@@ -68,6 +67,12 @@ declare_rule! {
     /// import { type A, type B } from "./mod.js";
     /// ```
     ///
+    /// ```ts,expect_diagnostic
+    /// import { type A, B } from "./mod.js";
+    /// let c: A;
+    /// let d: typeof B;
+    /// ```
+    ///
     /// ### Valid
     ///
     /// ```ts
@@ -78,6 +83,12 @@ declare_rule! {
     /// ```ts
     /// import { B } from "./mod.js";
     /// let a: B = new B();
+    /// ```
+    ///
+    /// ```ts
+    /// import { type A, B } from "./mod.js";
+    /// let c: A;
+    /// let d = new B();
     /// ```
     ///
     /// The rule ignores unused imports and imports with import attributes.
@@ -91,6 +102,7 @@ declare_rule! {
     pub UseImportType {
         version: "1.5.0",
         name: "useImportType",
+        language: "ts",
         sources: &[RuleSource::EslintTypeScript("consistent-type-imports")],
         source_kind: RuleSourceKind::Inspired,
         recommended: true,
@@ -506,12 +518,12 @@ impl Rule for UseImportType {
                 }
             }
         }
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! { "Use "<Emphasis>"import type"</Emphasis>"." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Use "<Emphasis>"import type"</Emphasis>"." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

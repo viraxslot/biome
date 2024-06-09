@@ -71,20 +71,34 @@ impl DeriveInput {
                 }
                 Data::Struct(data) => {
                     if data.fields.iter().all(|field| field.ident.is_some()) {
+                        let mut rest_field = None;
                         let fields = data
                             .fields
                             .into_iter()
                             .filter_map(|field| {
                                 field.ident.map(|ident| (ident, field.attrs, field.ty))
                             })
-                            .map(|(ident, attrs, ty)| {
+                            .filter_map(|(ident, attrs, ty)| {
                                 let attrs = StructFieldAttrs::try_from(&attrs)
                                     .expect("Could not parse field attributes");
                                 let key = attrs
                                     .rename
                                     .unwrap_or_else(|| Case::Camel.convert(&ident.to_string()));
 
-                                DeserializableFieldData {
+                                if rest_field.is_some() && attrs.rest {
+                                    abort!(
+                                        ident,
+                                        "Cannot have multiple fields with #[deserializable(rest)]"
+                                    )
+                                }
+                                if attrs.rest {
+                                    rest_field = Some(ident.clone());
+                                    // If rest field, we don't return a field data, because we don't
+                                    // want to deserialize into the field directly.
+                                    return None;
+                                }
+
+                                Some(DeserializableFieldData {
                                     bail_on_error: attrs.bail_on_error,
                                     deprecated: attrs.deprecated,
                                     ident,
@@ -93,12 +107,22 @@ impl DeriveInput {
                                     required: attrs.required,
                                     ty,
                                     validate: attrs.validate,
-                                }
+                                })
                             })
                             .collect();
 
+                        if rest_field.is_some()
+                            && matches!(attrs.unknown_fields, Some(UnknownFields::Deny))
+                        {
+                            abort!(
+                                rest_field.unwrap(),
+                                "Cannot have a field with #[deserializable(rest)] and #[deserializable(unknown_fields = \"deny\")]"
+                            )
+                        }
+
                         DeserializableData::Struct(DeserializableStructData {
                             fields,
+                            rest_field,
                             with_validator: attrs.with_validator,
                             unknown_fields: attrs.unknown_fields.unwrap_or_default(),
                         })
@@ -151,6 +175,7 @@ pub struct DeserializableNewtypeData {
 #[derive(Debug)]
 pub struct DeserializableStructData {
     fields: Vec<DeserializableFieldData>,
+    rest_field: Option<Ident>,
     with_validator: bool,
     unknown_fields: UnknownFields,
 }
@@ -324,38 +349,30 @@ fn generate_deserializable_struct(
         .fields
         .into_iter()
         .map(|field_data| {
-            let DeserializableFieldData { ident: field_ident, key, ty, .. } = field_data;
-
-            let is_optional = matches!(
-                &ty,
-                Type::Path(path) if path
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "Option")
-            );
-
-            let deprecation_notice = field_data.deprecated.map(|deprecated| {
-                match deprecated {
-                    DeprecatedField::Message(message) => quote! {
-                        diagnostics.push(DeserializationDiagnostic::new_deprecated(
-                            key_text.text(),
-                            value.range()
-                        ).with_note(#message));
-                    },
-                    DeprecatedField::UseInstead(path) => quote! {
-                        diagnostics.push(DeserializationDiagnostic::new_deprecated_use_instead(
-                            &key_text,
-                            key.range(),
-                            #path,
-                        ));
-                    },
-                }
+            let DeserializableFieldData {
+                ident: field_ident,
+                key,
+                ..
+            } = field_data;
+            let deprecation_notice = field_data.deprecated.map(|deprecated| match deprecated {
+                DeprecatedField::Message(message) => quote! {
+                    diagnostics.push(DeserializationDiagnostic::new_deprecated(
+                        key_text.text(),
+                        value.range()
+                    ).with_note(#message));
+                },
+                DeprecatedField::UseInstead(path) => quote! {
+                    diagnostics.push(DeserializationDiagnostic::new_deprecated_use_instead(
+                        &key_text,
+                        key.range(),
+                        #path,
+                    ));
+                },
             });
 
             let name = match field_data.passthrough_name {
                 true => quote! { name },
-                false => quote! { &key_text }
+                false => quote! { &key_text },
             };
 
             let validate = field_data.validate.map(|path| {
@@ -364,40 +381,20 @@ fn generate_deserializable_struct(
                 }
             });
 
-            if is_optional {
-                let error_result = if field_data.bail_on_error || field_data.required {
-                    quote! { return None }
-                } else {
-                    quote! { None }
-                };
-
-                quote! {
-                    #key => {
-                        result.#field_ident = match Deserializable::deserialize(&value, #name, diagnostics)#validate {
-                            Some(value) => {
-                                #deprecation_notice
-                                Some(value)
-                            }
-                            None => #error_result,
-                        };
-                    }
-                }
+            let error_result = if field_data.bail_on_error || field_data.required {
+                quote! { return None, }
             } else {
-                let error_result = if field_data.bail_on_error || field_data.required {
-                    quote! { return None, }
-                } else {
-                    quote! { {} }
-                };
+                quote! { {} }
+            };
 
-                quote! {
-                    #key => {
-                        match Deserializable::deserialize(&value, #name, diagnostics)#validate {
-                            Some(value) => {
-                                #deprecation_notice
-                                result.#field_ident = value;
-                            }
-                            None => #error_result
+            quote! {
+                #key => {
+                    match Deserializable::deserialize(&value, #name, diagnostics)#validate {
+                        Some(value) => {
+                            #deprecation_notice
+                            result.#field_ident = value;
                         }
+                        None => #error_result
                     }
                 }
             }
@@ -443,25 +440,36 @@ fn generate_deserializable_struct(
     } else {
         validator
     };
-    let unknown_key_handler = match data.unknown_fields {
-        UnknownFields::Warn | UnknownFields::Deny => {
-            let with_customseverity = if data.unknown_fields == UnknownFields::Warn {
-                quote! { .with_custom_severity(biome_diagnostics::Severity::Warning) }
-            } else {
-                quote! {}
-            };
-            quote! {
-                unknown_key => {
-                    const ALLOWED_KEYS: &[&str] = &[#(#allowed_keys),*];
-                    diagnostics.push(DeserializationDiagnostic::new_unknown_key(
-                        unknown_key,
-                        key.range(),
-                        ALLOWED_KEYS,
-                    )#with_customseverity)
+    let unknown_key_handler = if let Some(rest_field) = data.rest_field {
+        quote! {
+            unknown_key => {
+                let key_text = Text::deserialize(&key, "", diagnostics)?;
+                if let Some(value) = Deserializable::deserialize(&value, key_text.text(), diagnostics) {
+                    std::iter::Extend::extend(&mut result.#rest_field, [(key_text, value)]);
                 }
             }
         }
-        UnknownFields::Allow => quote! { _ => {} },
+    } else {
+        match data.unknown_fields {
+            UnknownFields::Warn | UnknownFields::Deny => {
+                let with_customseverity = if data.unknown_fields == UnknownFields::Warn {
+                    quote! { .with_custom_severity(biome_diagnostics::Severity::Warning) }
+                } else {
+                    quote! {}
+                };
+                quote! {
+                    unknown_key => {
+                        const ALLOWED_KEYS: &[&str] = &[#(#allowed_keys),*];
+                        diagnostics.push(DeserializationDiagnostic::new_unknown_key(
+                            unknown_key,
+                            key.range(),
+                            ALLOWED_KEYS,
+                        )#with_customseverity)
+                    }
+                }
+            }
+            UnknownFields::Allow => quote! { _ => {} },
+        }
     };
 
     let tuple_type = generate_generics_tuple(&generics);

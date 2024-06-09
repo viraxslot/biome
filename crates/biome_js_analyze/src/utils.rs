@@ -3,6 +3,7 @@ use biome_rowan::{AstNode, Direction, WalkEvent};
 use std::iter;
 
 pub mod batch;
+pub mod regex;
 pub mod rename;
 #[cfg(test)]
 pub mod tests;
@@ -35,7 +36,7 @@ impl<'a> Iterator for InterpretEscapedString<'a> {
 
 /// unescape
 ///
-pub(crate) fn escape_string(s: &str) -> Result<String, EscapeError> {
+pub(crate) fn unescape_string(s: &str) -> Result<String, EscapeError> {
     (InterpretEscapedString { s: s.chars() }).collect()
 }
 

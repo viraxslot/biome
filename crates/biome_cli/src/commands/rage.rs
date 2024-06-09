@@ -1,21 +1,18 @@
-use biome_configuration::ConfigurationPathHint;
+use biome_configuration::{ConfigurationPathHint, Rules};
 use biome_console::fmt::{Display, Formatter};
-use biome_console::{fmt, markup, ConsoleExt, HorizontalLine, Markup};
+use biome_console::{fmt, markup, ConsoleExt, HorizontalLine, Markup, Padding, SOFT_LINE};
 use biome_diagnostics::termcolor::{ColorChoice, WriteColor};
 use biome_diagnostics::{termcolor, PrintDescription};
 use biome_fs::FileSystem;
 use biome_service::configuration::{load_configuration, LoadedConfiguration};
 use biome_service::workspace::{client, RageEntry, RageParams};
 use biome_service::{DynRef, Workspace};
-use serde_json::Value;
-use std::collections::HashMap;
 use std::{env, io, ops::Deref};
 use tokio::runtime::Runtime;
 
 use crate::commands::daemon::read_most_recent_log_file;
 use crate::service::enumerate_pipes;
 use crate::{service, CliDiagnostic, CliSession, VERSION};
-use serde::Serialize;
 
 /// Handler for the `rage` command
 pub(crate) fn rage(
@@ -155,16 +152,9 @@ impl Display for RunningRomeServer {
 ")
         .fmt(f)?;
 
-                // Version 10.0.0 and below did not include a service version in the pipe name
-                let version = if version.is_empty() {
-                    "<=10.0.0"
-                } else {
-                    version.as_str()
-                };
-
                 markup!(
                     {Section("Server")}
-                    {KeyValuePair("Version", markup!({version}))}
+                    {KeyValuePair("Version", markup!({version.as_str()}))}
                 )
                 .fmt(f)?;
             }
@@ -223,10 +213,9 @@ impl Display for RageConfiguration<'_, '_> {
                             {Section("Formatter")}
                             {KeyValuePair("Format with errors", markup!({DebugDisplay(configuration.get_formatter_configuration().format_with_errors)}))}
                             {KeyValuePair("Indent style", markup!({DebugDisplay(formatter_configuration.indent_style)}))}
-                            {KeyValuePair("Indent size", markup!({DebugDisplay(formatter_configuration.indent_size)}))}
                             {KeyValuePair("Indent width", markup!({DebugDisplay(formatter_configuration.indent_width)}))}
                             {KeyValuePair("Line ending", markup!({DebugDisplay(formatter_configuration.line_ending)}))}
-                            {KeyValuePair("Line width", markup!({DebugDisplay(formatter_configuration.line_width.get())}))}
+                            {KeyValuePair("Line width", markup!({DebugDisplay(formatter_configuration.line_width.value())}))}
                             {KeyValuePair("Attribute position", markup!({DebugDisplay(formatter_configuration.attribute_position)}))}
                             {KeyValuePair("Ignore", markup!({DebugDisplay(formatter_configuration.ignore.iter().collect::<Vec<_>>())}))}
                             {KeyValuePair("Include", markup!({DebugDisplay(formatter_configuration.include.iter().collect::<Vec<_>>())}))}
@@ -239,17 +228,16 @@ impl Display for RageConfiguration<'_, '_> {
                             {KeyValuePair("Enabled", markup!({DebugDisplay(javascript_formatter_configuration.enabled)}))}
                             {KeyValuePair("JSX quote style", markup!({DebugDisplay(javascript_formatter_configuration.jsx_quote_style)}))}
                             {KeyValuePair("Quote properties", markup!({DebugDisplay(javascript_formatter_configuration.quote_properties)}))}
-                            {KeyValuePair("Trailing comma", markup!({DebugDisplay(javascript_formatter_configuration.trailing_comma)}))}
+                            {KeyValuePair("Trailing commas", markup!({DebugDisplay(javascript_formatter_configuration.trailing_commas)}))}
                             {KeyValuePair("Semicolons", markup!({DebugDisplay(javascript_formatter_configuration.semicolons)}))}
                             {KeyValuePair("Arrow parentheses", markup!({DebugDisplay(javascript_formatter_configuration.arrow_parentheses)}))}
                             {KeyValuePair("Bracket spacing", markup!({DebugDisplay(javascript_formatter_configuration.bracket_spacing)}))}
                             {KeyValuePair("Bracket same line", markup!({DebugDisplay(javascript_formatter_configuration.bracket_same_line)}))}
                             {KeyValuePair("Quote style", markup!({DebugDisplay(javascript_formatter_configuration.quote_style)}))}
                             {KeyValuePair("Indent style", markup!({DebugDisplayOption(javascript_formatter_configuration.indent_style)}))}
-                            {KeyValuePair("Indent size", markup!({DebugDisplayOption(javascript_formatter_configuration.indent_size)}))}
                             {KeyValuePair("Indent width", markup!({DebugDisplayOption(javascript_formatter_configuration.indent_width)}))}
                             {KeyValuePair("Line ending", markup!({DebugDisplayOption(javascript_formatter_configuration.line_ending)}))}
-                            {KeyValuePair("Line width", markup!({DebugDisplayOption(javascript_formatter_configuration.line_width.map(|lw| lw.get()))}))}
+                            {KeyValuePair("Line width", markup!({DebugDisplayOption(javascript_formatter_configuration.line_width.map(|lw| lw.value()))}))}
                             {KeyValuePair("Attribute position", markup!({DebugDisplay(javascript_formatter_configuration.attribute_position)}))}
                         )
                         .fmt(fmt)?;
@@ -261,21 +249,39 @@ impl Display for RageConfiguration<'_, '_> {
                             {KeyValuePair("Enabled", markup!({DebugDisplay(json_formatter_configuration.enabled)}))}
                             {KeyValuePair("Indent style", markup!({DebugDisplayOption(json_formatter_configuration.indent_style)}))}
                             {KeyValuePair("Indent width", markup!({DebugDisplayOption(json_formatter_configuration.indent_width)}))}
-                            {KeyValuePair("Indent size", markup!({DebugDisplayOption(json_formatter_configuration.indent_size)}))}
                             {KeyValuePair("Line ending", markup!({DebugDisplayOption(json_formatter_configuration.line_ending)}))}
-                            {KeyValuePair("Line width", markup!({DebugDisplayOption(json_formatter_configuration.line_width.map(|lw| lw.get()))}))}
+                            {KeyValuePair("Line width", markup!({DebugDisplayOption(json_formatter_configuration.line_width.map(|lw| lw.value()))}))}
                             {KeyValuePair("Trailing Commas", markup!({DebugDisplayOption(json_formatter_configuration.trailing_commas)}))}
+                        ).fmt(fmt)?;
+
+                        let css_formatter_configuration =
+                            configuration.get_css_formatter_configuration();
+                        markup! (
+                            {Section("CSS Formatter")}
+                            {KeyValuePair("Enabled", markup!({DebugDisplay(css_formatter_configuration.enabled)}))}
+                            {KeyValuePair("Indent style", markup!({DebugDisplay(css_formatter_configuration.indent_style)}))}
+                            {KeyValuePair("Indent width", markup!({DebugDisplay(css_formatter_configuration.indent_width)}))}
+                            {KeyValuePair("Line ending", markup!({DebugDisplay(css_formatter_configuration.line_ending)}))}
+                            {KeyValuePair("Line width", markup!({DebugDisplay(css_formatter_configuration.line_width)}))}
+                            {KeyValuePair("Quote style", markup!({DebugDisplay(css_formatter_configuration.quote_style)}))}
                         ).fmt(fmt)?;
                     }
 
                     // Print linter configuration if --linter option is true
                     if self.linter {
                         let linter_configuration = configuration.get_linter_rules();
+
+                        let javascript_linter = configuration.get_javascript_linter_configuration();
+                        let json_linter = configuration.get_json_linter_configuration();
+                        let css_linter = configuration.get_css_linter_configuration();
                         markup! (
                             {Section("Linter")}
-                            {KeyValuePair("Recommended", markup!({DebugDisplay(linter_configuration.recommended.unwrap_or(false))}))}
-                            {KeyValuePair("All", markup!({DebugDisplay(linter_configuration.all.unwrap_or(false))}))}
-                            {RageConfigurationLintRules("Rules",linter_configuration)}
+                            {KeyValuePair("JavaScript enabled", markup!({DebugDisplay(javascript_linter.enabled)}))}
+                            {KeyValuePair("JSON enabled", markup!({DebugDisplay(json_linter.enabled)}))}
+                            {KeyValuePair("CSS enabled", markup!({DebugDisplay(css_linter.enabled)}))}
+                            {KeyValuePair("Recommended", markup!({DebugDisplay(linter_configuration.recommended.unwrap_or_default())}))}
+                            {KeyValuePair("All", markup!({DebugDisplay(linter_configuration.all.unwrap_or_default())}))}
+                            {RageConfigurationLintRules("Enabled rules",linter_configuration)}
                         ).fmt(fmt)?;
                     }
                 }
@@ -291,48 +297,18 @@ impl Display for RageConfiguration<'_, '_> {
     }
 }
 
-struct RageConfigurationLintRules<'a, T>(&'a str, T);
+struct RageConfigurationLintRules<'a>(&'a str, Rules);
 
-impl<T> Display for RageConfigurationLintRules<'_, T>
-where
-    T: Serialize,
-{
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> io::Result<()> {
+impl Display for RageConfigurationLintRules<'_> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> io::Result<()> {
         let rules_str = self.0;
-        write!(fmt, "  {rules_str}:")?;
-
-        let rule_json_str = serde_json::to_string(&self.1)
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to serialize"))?;
-        let group_to_rules: HashMap<String, Value> = serde_json::from_str(rule_json_str.as_str())
-            .map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Failed to convert to HashMap")
-        })?;
-
-        let mut groups: Vec<&String> = group_to_rules.keys().collect();
-        groups.sort();
-
-        let first_padding_width = 30usize.saturating_sub(rules_str.len() + 1);
-        let mut padding_width = first_padding_width;
-
-        if groups.is_empty() {
-            for _ in 0..padding_width {
-                fmt.write_str(" ")?;
-            }
-            markup!(<Dim>"unset\n"</Dim>).fmt(fmt)?;
-        } else {
-            for group in groups {
-                if let Some(rules) = group_to_rules.get(group).and_then(Value::as_object) {
-                    for (rule_name, rule_config) in rules {
-                        for _ in 0..padding_width {
-                            fmt.write_str(" ")?;
-                        }
-                        fmt.write_str(&format!("{}/{} = {}\n", group, rule_name, rule_config))?;
-                        if padding_width == first_padding_width {
-                            padding_width = 30usize.saturating_sub(0) + 2;
-                        }
-                    }
-                }
-            }
+        let padding = Padding::new(2);
+        fmt.write_markup(markup! {{padding}{rules_str}":"})?;
+        fmt.write_markup(markup! {{SOFT_LINE}})?;
+        let rules = self.1.as_enabled_rules();
+        for rule in rules {
+            fmt.write_markup(markup! {{padding}{rule}})?;
+            fmt.write_markup(markup! {{SOFT_LINE}})?;
         }
 
         Ok(())

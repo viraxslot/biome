@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic, RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::jsx_ext::AnyJsxElement;
 use biome_rowan::{AstNode, BatchMutationExt};
 
@@ -45,6 +44,7 @@ declare_rule! {
     pub NoAriaHiddenOnFocusable {
         version: "1.4.0",
         name: "noAriaHiddenOnFocusable",
+        language: "jsx",
         sources: &[RuleSource::EslintJsxA11y("no-aria-hidden-on-focusable")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -113,11 +113,11 @@ impl Rule for NoAriaHiddenOnFocusable {
         let mut mutation = ctx.root().begin();
         let aria_hidden_attr = node.find_attribute_by_name("aria-hidden")?;
         mutation.remove_node(aria_hidden_attr);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove the aria-hidden attribute from the element." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the aria-hidden attribute from the element." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

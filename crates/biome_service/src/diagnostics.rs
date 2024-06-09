@@ -1,5 +1,6 @@
 use crate::workspace::DocumentFileSource;
-use biome_configuration::{CantLoadExtendFile, ConfigurationDiagnostic};
+use biome_configuration::diagnostics::{ConfigurationDiagnostic, EditorConfigDiagnostic};
+use biome_configuration::{BiomeDiagnostic, CantLoadExtendFile};
 use biome_console::fmt::Bytes;
 use biome_console::markup;
 use biome_diagnostics::{
@@ -7,7 +8,7 @@ use biome_diagnostics::{
 };
 use biome_formatter::{FormatError, PrintError};
 use biome_fs::{BiomePath, FileSystemDiagnostic};
-use biome_grit_patterns::ParseError;
+use biome_grit_patterns::CompileError;
 use biome_js_analyze::utils::rename::RenameError;
 use biome_js_analyze::RuleError;
 use serde::{Deserialize, Serialize};
@@ -150,15 +151,21 @@ impl From<FileSystemDiagnostic> for WorkspaceError {
     }
 }
 
-impl From<ConfigurationDiagnostic> for WorkspaceError {
-    fn from(value: ConfigurationDiagnostic) -> Self {
-        Self::Configuration(value)
+impl From<BiomeDiagnostic> for WorkspaceError {
+    fn from(value: BiomeDiagnostic) -> Self {
+        Self::Configuration(value.into())
+    }
+}
+
+impl From<EditorConfigDiagnostic> for WorkspaceError {
+    fn from(value: EditorConfigDiagnostic) -> Self {
+        Self::Configuration(value.into())
     }
 }
 
 impl From<CantLoadExtendFile> for WorkspaceError {
     fn from(value: CantLoadExtendFile) -> Self {
-        WorkspaceError::Configuration(ConfigurationDiagnostic::CantLoadExtendFile(value))
+        WorkspaceError::Configuration(BiomeDiagnostic::CantLoadExtendFile(value).into())
     }
 }
 
@@ -251,15 +258,18 @@ impl Diagnostic for FileTooLarge {
     fn message(&self, fmt: &mut biome_console::fmt::Formatter<'_>) -> std::io::Result<()> {
         fmt.write_markup(
             markup!{
-                "Size of "{self.path}" is "{Bytes(self.size)}" which exceeds configured maximum of "{Bytes(self.limit)}" for this project. The file size limit exists to prevent us inadvertently slowing down and loading large files that we shouldn't."
+                "Size of "{self.path}" is "{Bytes(self.size)}" which exceeds configured maximum of "{Bytes(self.limit)}" for this project.
+                The file size limit exists to prevent us inadvertently slowing down and loading large files that we shouldn't.
+                Use the `files.maxSize` configuration to change the maximum size of files processed."
             }
         )
     }
 
     fn description(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         write!(fmt,
-               "Size of {} is {} which exceeds configured maximum of {} for this project. \
-               The file size limit exists to prevent us inadvertently slowing down and loading large files that we shouldn't.",
+               "Size of {} is {} which exceeds configured maximum of {} for this project.\n\
+               The file size limit exists to prevent us inadvertently slowing down and loading large files that we shouldn't.\n\
+               Use the `files.maxSize` configuration to change the maximum size of files processed.",
                self.path, Bytes(self.size), Bytes(self.limit)
         )
     }
@@ -315,8 +325,8 @@ impl Diagnostic for SourceFileNotSupported {
 
 #[derive(Debug, Serialize, Deserialize, Diagnostic)]
 pub enum SearchError {
-    /// An invalid patterns was given
-    ParsePatternError(ParseError),
+    /// An invalid pattern was given
+    PatternCompilationError(CompileError),
     /// No pattern with the given ID
     InvalidPattern(InvalidPattern),
 }
@@ -415,9 +425,9 @@ impl From<VcsDiagnostic> for WorkspaceError {
     }
 }
 
-impl From<ParseError> for WorkspaceError {
-    fn from(value: ParseError) -> Self {
-        Self::SearchError(SearchError::ParsePatternError(value))
+impl From<CompileError> for WorkspaceError {
+    fn from(value: CompileError) -> Self {
+        Self::SearchError(SearchError::PatternCompilationError(value))
     }
 }
 

@@ -8,7 +8,7 @@ keywords.workspace   = true
 license.workspace    = true
 name                 = "biome_deserialize"
 repository.workspace = true
-version              = "0.5.7"
+version              = "0.6.0"
 
 [dependencies]
 biome_console            = { workspace = true }
@@ -21,9 +21,13 @@ bitflags                 = { workspace = true }
 indexmap                 = { workspace = true, features = ["serde"] }
 schemars                 = { workspace = true, optional = true }
 serde                    = { workspace = true }
+serde_json               = { workspace = true, optional = true }
+smallvec                 = { workspace = true, optional = true }
 
 [features]
-schema = ["schemars", "schemars/indexmap"]
+schema   = ["schemars", "schemars/indexmap"]
+serde    = ["serde_json"]
+smallvec = ["dep:smallvec"]
 
 [lints]
 workspace = true

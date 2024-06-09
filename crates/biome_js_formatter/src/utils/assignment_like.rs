@@ -16,7 +16,7 @@ use biome_js_syntax::{
     JsPropertyClassMember, JsPropertyClassMemberFields, JsPropertyObjectMember, JsSyntaxKind,
     JsVariableDeclarator, TsIdentifierBinding, TsInitializedPropertySignatureClassMember,
     TsInitializedPropertySignatureClassMemberFields, TsPropertySignatureClassMember,
-    TsPropertySignatureClassMemberFields, TsTypeAliasDeclaration, TsTypeArguments,
+    TsPropertySignatureClassMemberFields, TsTypeAliasDeclaration, TsTypeArguments, TsUnionType,
 };
 use biome_js_syntax::{AnyJsLiteralExpression, JsUnaryExpression};
 use biome_rowan::{declare_node_union, AstNode, SyntaxNodeOptionExt, SyntaxResult};
@@ -888,7 +888,23 @@ impl AnyJsAssignmentLike {
 
         let is_complex_type_alias = self.is_complex_type_alias()?;
 
-        Ok(is_complex_destructuring || has_complex_type_annotation || is_complex_type_alias)
+        let is_right_arrow_func = self.right().map_or(false, |right| match right {
+            RightAssignmentLike::JsInitializerClause(init) => {
+                init.expression().map_or(false, |expression| {
+                    matches!(expression, AnyJsExpression::JsArrowFunctionExpression(_))
+                })
+            }
+            _ => false,
+        });
+        let is_breakable = self
+            .annotation()
+            .and_then(|annotation| is_annotation_breakable(annotation).ok())
+            .unwrap_or(false);
+
+        Ok(is_complex_destructuring
+            || has_complex_type_annotation
+            || is_complex_type_alias
+            || (is_right_arrow_func && is_breakable))
     }
 
     /// Checks if the current assignment is eligible for [AssignmentLikeLayout::BreakAfterOperator]
@@ -910,7 +926,26 @@ impl AnyJsAssignmentLike {
                     || should_break_after_operator(&initializer.expression()?, comments, f)?
             }
             RightAssignmentLike::AnyTsType(AnyTsType::TsUnionType(ty)) => {
-                comments.has_leading_comments(ty.syntax())
+                // Recursively checks if the union type is nested and identifies the innermost union type.
+                // If a leading comment is found while navigating to the inner union type,
+                // it is considered as having leading comments.
+                let mut union_type = ty.clone();
+                let mut has_leading_comments = comments.has_leading_comments(union_type.syntax());
+                while is_nested_union_type(&union_type)? && !has_leading_comments {
+                    if let Some(Ok(inner_union_type)) = union_type.types().last() {
+                        let inner_union_type = TsUnionType::cast_ref(inner_union_type.syntax());
+                        if let Some(inner_union_type) = inner_union_type {
+                            has_leading_comments =
+                                comments.has_leading_comments(inner_union_type.syntax());
+                            union_type = inner_union_type;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                has_leading_comments
             }
             right => comments.has_leading_own_line_comment(right.syntax()),
         };
@@ -1119,7 +1154,7 @@ fn is_poorly_breakable_member_or_call_chain(
     expression: &AnyJsExpression,
     f: &Formatter<JsFormatContext>,
 ) -> SyntaxResult<bool> {
-    let threshold = f.options().line_width().get() / 4;
+    let threshold = f.options().line_width().value() / 4;
 
     // Only call and member chains are poorly breakable
     // - `obj.member.prop`
@@ -1303,6 +1338,39 @@ fn is_complex_type_arguments(type_arguments: TsTypeArguments) -> SyntaxResult<bo
     // https://github.com/prettier/prettier/blob/a043ac0d733c4d53f980aa73807a63fc914f23bd/src/language-js/print/assignment.js#L454
 
     Ok(false)
+}
+
+/// If a union type has only one type and it's a union type, then it's a nested union type
+/// ```js
+/// type A = | (A | B)
+///          ^^^^^^^^^^
+/// ```
+/// The final format will only keep the inner union type
+fn is_nested_union_type(union_type: &TsUnionType) -> SyntaxResult<bool> {
+    if union_type.types().len() == 1 {
+        let ty = union_type.types().first();
+        if let Some(ty) = ty {
+            let is_nested = TsUnionType::can_cast(ty?.syntax().kind());
+            return Ok(is_nested);
+        }
+    }
+    Ok(false)
+}
+
+fn is_annotation_breakable(annotation: AnyTsVariableAnnotation) -> SyntaxResult<bool> {
+    let is_breakable = annotation
+        .type_annotation()?
+        .and_then(|type_annotation| type_annotation.ty().ok())
+        .map_or(false, |ty| match ty {
+            AnyTsType::TsReferenceType(reference_type) => {
+                reference_type.type_arguments().map_or(false, |type_args| {
+                    type_args.ts_type_argument_list().len() > 0
+                })
+            }
+            _ => false,
+        });
+
+    Ok(is_breakable)
 }
 
 /// Formats an expression and passes the assignment layout to its formatting function if the expressions

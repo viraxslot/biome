@@ -3,7 +3,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{inner_string_text, AnyJsImportSpecifierLike, JsSyntaxKind, JsSyntaxToken};
 use biome_rowan::BatchMutationExt;
 
@@ -44,6 +43,7 @@ declare_rule! {
     pub UseNodejsImportProtocol {
         version: "1.5.0",
         name: "useNodejsImportProtocol",
+        language: "js",
         sources: &[RuleSource::EslintUnicorn("prefer-node-protocol")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -93,12 +93,12 @@ impl Rule for UseNodejsImportProtocol {
         );
         let mut mutation = ctx.root().begin();
         mutation.replace_token(module_name.clone(), new_module_name);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Add the "<Emphasis>"node:"</Emphasis>" protocol." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Add the "<Emphasis>"node:"</Emphasis>" protocol." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

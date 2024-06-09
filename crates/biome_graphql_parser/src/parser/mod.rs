@@ -15,6 +15,51 @@ use biome_parser::token_source::Trivia;
 use biome_parser::ParserContext;
 use definitions::DefinitionList;
 
+use self::value::{is_at_string, parse_string};
+
+/// Graphql allow keywords to be used as names
+const GRAPHQL_POTENTIAL_NAME_SET: TokenSet<GraphqlSyntaxKind> = token_set![
+    GRAPHQL_NAME,
+    TRUE_KW,
+    FALSE_KW,
+    QUERY_KW,
+    MUTATION_KW,
+    SUBSCRIPTION_KW,
+    FRAGMENT_KW,
+    ON_KW,
+    NULL_KW,
+    SCHEMA_KW,
+    EXTEND_KW,
+    SCALAR_KW,
+    TYPE_KW,
+    IMPLEMENTS_KW,
+    INTERFACE_KW,
+    UNION_KW,
+    ENUM_KW,
+    INPUT_KW,
+    DIRECTIVE_KW,
+    REPEATABLE_KW,
+    UPPER_QUERY_KW,
+    UPPER_MUTATION_KW,
+    UPPER_SUBSCRIPTION_KW,
+    UPPER_FIELD_KW,
+    FRAGMENT_DEFINITION_KW,
+    FRAGMENT_SPREAD_KW,
+    INLINE_FRAGMENT_KW,
+    VARIABLE_DEFINITION_KW,
+    UPPER_SCHEMA_KW,
+    UPPER_SCALAR_KW,
+    UPPER_OBJECT_KW,
+    FIELD_DEFINITION_KW,
+    ARGUMENT_DEFINITION_KW,
+    UPPER_INTERFACE_KW,
+    UPPER_UNION_KW,
+    UPPER_ENUM_KW,
+    ENUM_VALUE_KW,
+    INPUT_OBJECT_KW,
+    INPUT_FIELD_DEFINITION_KW,
+];
+
 pub(crate) struct GraphqlParser<'source> {
     context: ParserContext<GraphqlSyntaxKind>,
     source: GraphqlTokenSource<'source>,
@@ -26,10 +71,6 @@ impl<'source> GraphqlParser<'source> {
             context: ParserContext::default(),
             source: GraphqlTokenSource::from_str(source),
         }
-    }
-
-    pub fn lookahead(&mut self) -> GraphqlSyntaxKind {
-        self.source.lookahead()
     }
 
     pub fn finish(
@@ -83,16 +124,34 @@ pub(crate) fn parse_root(p: &mut GraphqlParser) -> CompletedMarker {
 
 #[inline]
 fn parse_name(p: &mut GraphqlParser) -> ParsedSyntax {
-    if !p.at(GRAPHQL_NAME) {
+    if !is_nth_at_name(p, 0) {
         return Absent;
     }
 
     let m = p.start();
-    p.bump(GRAPHQL_NAME);
+    p.bump_remap(GRAPHQL_NAME);
     Present(m.complete(p, GRAPHQL_NAME))
 }
 
 #[inline]
-fn is_at_name(p: &GraphqlParser) -> bool {
-    p.at(GRAPHQL_NAME)
+fn parse_description(p: &mut GraphqlParser) -> ParsedSyntax {
+    if !is_at_string(p) {
+        return Absent;
+    }
+
+    let m = p.start();
+    // already checked for in `is_at_string`
+    parse_string(p).ok();
+
+    Present(m.complete(p, GRAPHQL_DESCRIPTION))
+}
+
+#[inline]
+fn is_nth_at_name(p: &mut GraphqlParser, n: usize) -> bool {
+    p.nth_at_ts(n, GRAPHQL_POTENTIAL_NAME_SET)
+}
+
+#[inline]
+fn is_nth_at_non_kw_name(p: &mut GraphqlParser, n: usize) -> bool {
+    p.nth_at(n, GRAPHQL_NAME)
 }

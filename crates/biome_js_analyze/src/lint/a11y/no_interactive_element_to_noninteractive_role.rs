@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic, RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::jsx_ext::AnyJsxElement;
 use biome_rowan::{AstNode, BatchMutationExt};
 
@@ -35,6 +34,7 @@ declare_rule! {
     pub NoInteractiveElementToNoninteractiveRole {
         version: "1.3.0",
         name: "noInteractiveElementToNoninteractiveRole",
+        language: "jsx",
         sources: &[RuleSource::EslintJsxA11y("no-interactive-element-to-noninteractive-role")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -106,11 +106,11 @@ impl Rule for NoInteractiveElementToNoninteractiveRole {
 
         let mut mutation = ctx.root().begin();
         mutation.remove_node(role_attribute);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove the "<Emphasis>"role"</Emphasis>" attribute." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the "<Emphasis>"role"</Emphasis>" attribute." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

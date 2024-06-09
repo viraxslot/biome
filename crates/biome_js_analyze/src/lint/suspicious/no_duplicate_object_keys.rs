@@ -57,6 +57,7 @@ declare_rule! {
     pub NoDuplicateObjectKeys {
         version: "1.0.0",
         name: "noDuplicateObjectKeys",
+        language: "js",
         sources: &[RuleSource::Eslint("no-dupe-keys")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -308,12 +309,12 @@ impl Rule for NoDuplicateObjectKeys {
     ) -> Option<JsRuleAction> {
         let mut batch = ctx.root().begin();
         batch.remove_js_object_member(member_definition.node());
-        Some(JsRuleAction {
-            category: biome_analyze::ActionCategory::QuickFix,
+        Some(JsRuleAction::new(
+            biome_analyze::ActionCategory::QuickFix,
             // The property initialization could contain side effects
-            applicability: biome_diagnostics::Applicability::MaybeIncorrect,
-            message: markup!("Remove this " {member_definition.to_string()}).to_owned(),
-            mutation: batch,
-        })
+            ctx.metadata().applicability(),
+            markup!("Remove this " {member_definition.to_string()}).to_owned(),
+            batch,
+        ))
     }
 }

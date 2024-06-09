@@ -7,7 +7,6 @@ use biome_json_parser::JsonParserOptions;
 use biome_service::DynRef;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::vec;
 
 use crate::diagnostics::MigrationDiagnostic;
 use crate::CliDiagnostic;
@@ -68,11 +67,11 @@ pub(crate) const IGNORE_FILE: &str = ".eslintignore";
 /// when no configuration file is found in the working directory.
 ///
 /// Deserialization errors are reported using `console`.
-/// Other errors (File Not found, unspported config format, ...) are directly returned.
+/// Other errors (File Not found, unsupported config format, ...) are directly returned.
 ///
 /// We extract the ESLint configuration from a JavaScript file, by invoking `node`.
 ///
-/// The `extends` field is recusively resolved.
+/// The `extends` field is recursively resolved.
 pub(crate) fn read_eslint_config(
     fs: &DynRef<'_, dyn FileSystem>,
     console: &mut dyn Console,
@@ -160,14 +159,19 @@ fn load_legacy_config_data(
             let mut content = String::new();
             file.read_to_string(&mut content)?;
             if path.file_name().is_some_and(|name| name == PACKAGE_JSON) {
-                let (deserialized, _) = deserialize_from_json_str::<eslint_eslint::EslintPackageJson>(
+                let (deserialized, diagnostics) = deserialize_from_json_str::<eslint_eslint::EslintPackageJson>(
                     &content,
                     JsonParserOptions::default()
                         .with_allow_trailing_commas()
                         .with_allow_comments(),
                     "",
                 ).consume();
-                (deserialized.and_then(|packagejson| packagejson.eslint_config), vec![])
+                (deserialized.and_then(|mut packagejson| {
+                    if let Some(eslint_config) = packagejson.eslint_config.as_mut() {
+                        eslint_config.ignore_patterns.extend(packagejson.eslint_ignore);
+                    }
+                    packagejson.eslint_config
+                }), diagnostics)
             } else {
                 deserialize_from_json_str::<eslint_eslint::LegacyConfigData>(
                     &content,
@@ -259,17 +263,10 @@ fn load_eslint_extends_config(
             }
         };
         // load ESLint preset
-        let Ok(node::Resolution {
+        let node::Resolution {
             content,
             resolved_path,
-        }) = node::load_config(&module_name)
-        else {
-            return Err(CliDiagnostic::MigrateError(MigrationDiagnostic {
-                reason: format!(
-                    "The module '{rest}' cannot be loaded. Make sure that the module exists."
-                ),
-            }));
-        };
+        } = node::load_config(&module_name)?;
         let deserialized = deserialize_from_json_str::<eslint_eslint::PluginExport>(
             &content,
             JsonParserOptions::default(),
@@ -295,17 +292,10 @@ fn load_eslint_extends_config(
         } else {
             EslintPackage::Config.resolve_name(name)
         };
-        let Ok(node::Resolution {
+        let node::Resolution {
             content,
             resolved_path,
-        }) = node::load_config(&module_name)
-        else {
-            return Err(CliDiagnostic::MigrateError(MigrationDiagnostic {
-                reason: format!(
-                    "The module '{module_name}' cannot be loaded. Make sure that the module exists."
-                ),
-            }));
-        };
+        } = node::load_config(&module_name)?;
         let deserialized = deserialize_from_json_str::<eslint_eslint::LegacyConfigData>(
             &content,
             JsonParserOptions::default(),
@@ -370,11 +360,10 @@ impl EslintPackage {
             EslintPackage::Config => "eslint-config-",
             EslintPackage::Plugin => "eslint-plugin-",
         };
-        debug_assert!(matches!(artifact, "eslint-plugin-" | "eslint-config-"));
         if name.starts_with('@') {
             // handle scoped module
             if let Some((scope, scoped)) = name.split_once('/') {
-                if scoped.starts_with(artifact) {
+                if scoped.starts_with(artifact) || scoped == artifact.trim_end_matches('-') {
                     Cow::Borrowed(name)
                 } else {
                     Cow::Owned(format!("{scope}/{artifact}{scoped}"))

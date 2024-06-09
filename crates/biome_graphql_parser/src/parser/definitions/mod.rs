@@ -1,14 +1,39 @@
+mod directive;
+mod r#enum;
+mod field;
+mod fragment;
+mod input_object;
+mod interface;
+mod object;
 mod operation;
+mod scalar;
+mod schema;
+mod union;
 
 use crate::parser::{parse_error::expected_any_definition, GraphqlParser};
-use biome_graphql_syntax::GraphqlSyntaxKind::{self, *};
+use biome_graphql_syntax::{
+    GraphqlSyntaxKind::{self, *},
+    T,
+};
 use biome_parser::{
     parse_lists::ParseNodeList, parse_recovery::ParseRecovery, parsed_syntax::ParsedSyntax,
     prelude::ParsedSyntax::*, Parser,
 };
 
-use self::operation::{is_at_operation, parse_operation_definition};
-pub(crate) use operation::is_at_selection_set_end;
+use self::{
+    directive::parse_directive_definition,
+    fragment::parse_fragment_definition,
+    input_object::{parse_input_object_type_definition, parse_input_object_type_extension},
+    interface::{parse_interface_type_definition, parse_interface_type_extension},
+    object::{parse_object_type_definition, parse_object_type_extension},
+    operation::{parse_operation_definition, parse_selection_set},
+    r#enum::{parse_enum_type_definition, parse_enum_type_extension},
+    scalar::{parse_scalar_type_definition, parse_scalar_type_extension},
+    schema::{parse_schema_definition, parse_schema_extension},
+    union::{parse_union_type_definition, parse_union_type_extension},
+};
+
+use super::value::is_at_string;
 
 struct DefinitionListParseRecovery;
 
@@ -50,15 +75,56 @@ impl ParseNodeList for DefinitionList {
 
 #[inline]
 fn parse_definition(p: &mut GraphqlParser) -> ParsedSyntax {
-    match p.cur() {
-        // TODO: parse any definition
-        _ if is_at_operation(p) => parse_operation_definition(p),
+    let keyword = if is_at_string(p) { p.nth(1) } else { p.cur() };
+    match keyword {
+        T![query] | T![mutation] | T![subscription] => parse_operation_definition(p),
+        T!['{'] => parse_selection_set(p),
+        T![fragment] => parse_fragment_definition(p),
+        T![schema] => parse_schema_definition(p),
+        T![scalar] => parse_scalar_type_definition(p),
+        T![type] => parse_object_type_definition(p),
+        T![interface] => parse_interface_type_definition(p),
+        T![union] => parse_union_type_definition(p),
+        T![enum] => parse_enum_type_definition(p),
+        T![input] => parse_input_object_type_definition(p),
+        T![directive] => parse_directive_definition(p),
+        T![extend] => parse_extension(p),
         _ => Absent,
     }
 }
 
 #[inline]
-fn is_at_definition(p: &GraphqlParser<'_>) -> bool {
-    // TODO: recover at any definition
-    is_at_operation(p)
+fn parse_extension(p: &mut GraphqlParser) -> ParsedSyntax {
+    match p.nth(1) {
+        T![schema] => parse_schema_extension(p),
+        T![scalar] => parse_scalar_type_extension(p),
+        T![type] => parse_object_type_extension(p),
+        T![interface] => parse_interface_type_extension(p),
+        T![union] => parse_union_type_extension(p),
+        T![enum] => parse_enum_type_extension(p),
+        T![input] => parse_input_object_type_extension(p),
+        _ => Absent,
+    }
+}
+
+#[inline]
+fn is_at_definition(p: &mut GraphqlParser<'_>) -> bool {
+    let keyword = if is_at_string(p) { p.nth(1) } else { p.cur() };
+    matches!(
+        keyword,
+        T![query]
+            | T![mutation]
+            | T![subscription]
+            | T!['{']
+            | T![fragment]
+            | T![schema]
+            | T![scalar]
+            | T![type]
+            | T![interface]
+            | T![union]
+            | T![enum]
+            | T![input]
+            | T![directive]
+            | T![extend]
+    )
 }

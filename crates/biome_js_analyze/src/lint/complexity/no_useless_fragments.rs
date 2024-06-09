@@ -4,10 +4,9 @@ use crate::JsRuleAction;
 use biome_analyze::context::RuleContext;
 use biome_analyze::{declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic, RuleSource};
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make::{
-    ident, js_expression_statement, js_string_literal_expression, jsx_expression_child, jsx_string,
-    jsx_tag_expression, token, JsxExpressionChildBuilder,
+    js_expression_statement, js_string_literal_expression, jsx_expression_child, jsx_string,
+    jsx_string_literal, jsx_tag_expression, token, JsxExpressionChildBuilder,
 };
 use biome_js_syntax::{
     AnyJsExpression, AnyJsxChild, AnyJsxElementName, AnyJsxTag, JsLanguage,
@@ -62,6 +61,7 @@ declare_rule! {
     pub NoUselessFragments {
         version: "1.0.0",
         name: "noUselessFragments",
+        language: "jsx",
         sources: &[RuleSource::EslintReact("jsx-no-useless-fragment")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -268,12 +268,15 @@ impl Rule for NoUselessFragments {
                         jsx_tag_expression(AnyJsxTag::JsxSelfClosingElement(node)).into_syntax(),
                     ),
                     AnyJsxChild::JsxText(text) => {
-                        let new_value =
-                            format!("\"{}\"", text.value_token().ok()?.token_text().trim());
+                        let new_value = text.value_token().ok()?.token_text();
+                        let new_value = new_value.trim();
                         if parent.kind() == JsSyntaxKind::JSX_EXPRESSION_ATTRIBUTE_VALUE {
-                            Some(jsx_string(ident(&new_value)).into_syntax())
+                            Some(jsx_string(jsx_string_literal(new_value)).into_syntax())
                         } else {
-                            Some(js_string_literal_expression(ident(&new_value)).into_syntax())
+                            Some(
+                                js_string_literal_expression(jsx_string_literal(new_value))
+                                    .into_syntax(),
+                            )
                         }
                     }
                     AnyJsxChild::JsxExpressionChild(child) => {
@@ -319,12 +322,12 @@ impl Rule for NoUselessFragments {
             }
         }
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove the Fragment" }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the Fragment" }.to_owned(),
             mutation,
-        })
+        ))
     }
 
     fn diagnostic(ctx: &RuleContext<Self>, _state: &Self::State) -> Option<RuleDiagnostic> {

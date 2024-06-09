@@ -3,7 +3,9 @@ use crate::services::semantic::SemanticServices;
 use biome_analyze::context::RuleContext;
 use biome_analyze::{declare_rule, Rule, RuleDiagnostic, RuleSource};
 use biome_console::markup;
-use biome_js_syntax::{JsFileSource, Language, TextRange, TsAsExpression, TsReferenceType};
+use biome_js_syntax::{
+    AnyJsFunction, JsFileSource, Language, TextRange, TsAsExpression, TsReferenceType,
+};
 use biome_rowan::AstNode;
 
 declare_rule! {
@@ -31,6 +33,7 @@ declare_rule! {
     pub NoUndeclaredVariables {
         version: "1.0.0",
         name: "noUndeclaredVariables",
+        language: "js",
         sources: &[RuleSource::Eslint("no-undef")],
         recommended: false,
     }
@@ -66,6 +69,20 @@ impl Rule for NoUndeclaredVariables {
                     return None;
                 }
 
+                // arguments object within non-arrow functions
+                if text == "arguments" {
+                    let is_in_non_arrow_function =
+                        identifier.syntax().ancestors().any(|ancestor| {
+                            !matches!(
+                                AnyJsFunction::cast(ancestor),
+                                None | Some(AnyJsFunction::JsArrowFunctionExpression(_))
+                            )
+                        });
+                    if is_in_non_arrow_function {
+                        return None;
+                    }
+                }
+
                 if is_global(text, source_type) {
                     return None;
                 }
@@ -82,9 +99,11 @@ impl Rule for NoUndeclaredVariables {
             rule_category!(),
             *span,
             markup! {
-                "The "<Emphasis>{name}</Emphasis>" variable is undeclared"
+                "The "<Emphasis>{name}</Emphasis>" variable is undeclared."
             },
-        ))
+        ).note(markup! {
+            "By default, Biome recognizes browser and Node.js globals.\nYou can ignore more globals using the "<Hyperlink href="https://biomejs.dev/reference/configuration/#javascriptglobals">"javascript.globals"</Hyperlink>" configuration."
+        }))
     }
 }
 

@@ -4,9 +4,8 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
-use biome_js_syntax::{AnyJsExpression, JsInExpression, JsInstanceofExpression};
+use biome_js_syntax::{is_negation, AnyJsExpression, JsInExpression, JsInstanceofExpression};
 use biome_rowan::{declare_node_union, AstNode, AstNodeExt, BatchMutationExt};
 
 declare_rule! {
@@ -36,6 +35,7 @@ declare_rule! {
     pub NoUnsafeNegation {
         version: "1.0.0",
         name: "noUnsafeNegation",
+        language: "js",
         sources: &[RuleSource::Eslint("no-unsafe-negation")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -53,27 +53,13 @@ impl Rule for NoUnsafeNegation {
         match node {
             JsInOrInstanceOfExpression::JsInstanceofExpression(expr) => {
                 let left = expr.left().ok()?;
-                if let Some(unary) = left.as_js_unary_expression() {
-                    match unary.operator().ok()? {
-                        biome_js_syntax::JsUnaryOperator::LogicalNot => Some(()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
+
+                is_negation(left.syntax()).and(Some(()))
             }
             JsInOrInstanceOfExpression::JsInExpression(expr) => {
                 let left = expr.property().ok()?;
-                if let Some(biome_js_syntax::AnyJsExpression::JsUnaryExpression(unary)) =
-                    left.as_any_js_expression()
-                {
-                    match unary.operator().ok()? {
-                        biome_js_syntax::JsUnaryOperator::LogicalNot => Some(()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
+
+                is_negation(left.syntax()).and(Some(()))
             }
         }
     }
@@ -139,12 +125,12 @@ impl Rule for NoUnsafeNegation {
             }
         }
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Wrap the expression with a parenthesis" }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Wrap the expression with a parenthesis" }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

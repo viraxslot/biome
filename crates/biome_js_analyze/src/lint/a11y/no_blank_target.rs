@@ -2,7 +2,6 @@ use crate::JsRuleAction;
 use biome_analyze::context::RuleContext;
 use biome_analyze::{declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic, RuleSource};
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make::{
     jsx_attribute, jsx_attribute_initializer_clause, jsx_attribute_list, jsx_ident, jsx_name,
     jsx_string, jsx_string_literal, token,
@@ -51,6 +50,7 @@ declare_rule! {
     pub NoBlankTarget {
         version: "1.0.0",
         name: "noBlankTarget",
+        language: "jsx",
         sources: &[RuleSource::EslintReact("jsx-no-target-blank")],
         recommended: true,
         fix_kind: FixKind::Safe,
@@ -112,10 +112,13 @@ impl Rule for NoBlankTarget {
             let prev_jsx_attribute = rel_attribute.initializer()?.value().ok()?;
             let prev_jsx_string = prev_jsx_attribute.as_jsx_string()?;
             let new_text = format!(
-                "\"noreferrer {}\"",
+                "noreferrer {}",
                 prev_jsx_string.inner_string_text().ok()?.text()
             );
-            mutation.replace_node(prev_jsx_string.clone(), jsx_string(jsx_ident(&new_text)));
+            mutation.replace_node(
+                prev_jsx_string.clone(),
+                jsx_string(jsx_string_literal(new_text.trim_end())),
+            );
 
             (markup! {
                 "Add the "<Emphasis>"\"noreferrer\""</Emphasis>" to the existing attribute."
@@ -146,12 +149,12 @@ impl Rule for NoBlankTarget {
             .to_owned()
         };
 
-        Some(JsRuleAction {
-            mutation,
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
             message,
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-        })
+            mutation,
+        ))
     }
 
     fn diagnostic(

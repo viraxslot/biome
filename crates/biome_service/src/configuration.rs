@@ -1,9 +1,9 @@
-use crate::settings::WorkspaceSettings;
+use crate::settings::Settings;
 use crate::{DynRef, WorkspaceError, VERSION};
 use biome_analyze::AnalyzerRules;
-use biome_configuration::diagnostics::CantLoadExtendFile;
+use biome_configuration::diagnostics::{CantLoadExtendFile, EditorConfigDiagnostic};
 use biome_configuration::{
-    push_to_analyzer_rules, ConfigurationDiagnostic, ConfigurationPathHint, ConfigurationPayload,
+    push_to_analyzer_rules, BiomeDiagnostic, ConfigurationPathHint, ConfigurationPayload,
     PartialConfiguration,
 };
 use biome_console::markup;
@@ -172,6 +172,7 @@ fn load_config(
         // Path hint from LSP is always the workspace root
         // we use it as the resolution base path.
         ConfigurationPathHint::FromLsp(ref path) => path.clone(),
+        ConfigurationPathHint::FromWorkspace(ref path) => path.clone(),
         // Path hint from user means the command is invoked from the CLI
         // So we use the working directory (CWD) as the resolution base path
         ConfigurationPathHint::FromUser(_) | ConfigurationPathHint::None => file_system
@@ -206,11 +207,8 @@ fn load_config(
     let configuration_directory = match base_path {
         ConfigurationPathHint::FromLsp(path) => path,
         ConfigurationPathHint::FromUser(path) => path,
-        // working directory will only work in
-        _ => match file_system.working_directory() {
-            Some(working_directory) => working_directory,
-            None => PathBuf::new(),
-        },
+        ConfigurationPathHint::FromWorkspace(path) => path,
+        ConfigurationPathHint::None => file_system.working_directory().unwrap_or_default(),
     };
 
     // We first search for `biome.json` or `biome.jsonc` files
@@ -260,6 +258,29 @@ fn load_config(
     }
 }
 
+pub fn load_editorconfig(
+    file_system: &DynRef<'_, dyn FileSystem>,
+    workspace_root: PathBuf,
+) -> Result<(Option<PartialConfiguration>, Vec<EditorConfigDiagnostic>), WorkspaceError> {
+    // How .editorconfig is supposed to be resolved: https://editorconfig.org/#file-location
+    // We currently don't support the `root` property, so we just search for the file like we do for biome.json
+    if let Some(auto_search_result) =
+        match file_system.auto_search(&workspace_root, [".editorconfig"].as_slice(), false) {
+            Ok(result) => result,
+            Err(error) => return Err(WorkspaceError::from(error)),
+        }
+    {
+        let AutoSearchResult {
+            content,
+            file_path: _path,
+        } = auto_search_result;
+        let editorconfig = biome_configuration::editorconfig::parse_str(&content)?;
+        Ok(editorconfig.to_biome())
+    } else {
+        Ok((None, vec![]))
+    }
+}
+
 /// Creates a new configuration on file system
 ///
 /// ## Errors
@@ -272,17 +293,20 @@ pub fn create_config(
     mut configuration: PartialConfiguration,
     emit_jsonc: bool,
 ) -> Result<(), WorkspaceError> {
-    let path = if emit_jsonc {
-        PathBuf::from(ConfigName::biome_jsonc())
-    } else {
-        PathBuf::from(ConfigName::biome_json())
-    };
+    let json_path = PathBuf::from(ConfigName::biome_json());
+    let jsonc_path = PathBuf::from(ConfigName::biome_jsonc());
+
+    if fs.path_exists(&json_path) || fs.path_exists(&jsonc_path) {
+        return Err(BiomeDiagnostic::new_already_exists().into());
+    }
+
+    let path = if emit_jsonc { jsonc_path } else { json_path };
 
     let options = OpenOptions::default().write(true).create_new(true);
 
     let mut config_file = fs.open_with_options(&path, options).map_err(|err| {
         if err.kind() == ErrorKind::AlreadyExists {
-            WorkspaceError::Configuration(ConfigurationDiagnostic::new_already_exists())
+            BiomeDiagnostic::new_already_exists().into()
         } else {
             WorkspaceError::cant_read_file(format!("{}", path.display()))
         }
@@ -299,9 +323,8 @@ pub fn create_config(
         configuration.schema = Some(format!("https://biomejs.dev/schemas/{VERSION}/schema.json"));
     }
 
-    let contents = serde_json::to_string_pretty(&configuration).map_err(|_| {
-        WorkspaceError::Configuration(ConfigurationDiagnostic::new_serialization_error())
-    })?;
+    let contents = serde_json::to_string_pretty(&configuration)
+        .map_err(|_| BiomeDiagnostic::new_serialization_error())?;
 
     let parsed = parse_json(&contents, JsonParserOptions::default());
     let formatted =
@@ -316,8 +339,8 @@ pub fn create_config(
     Ok(())
 }
 
-/// Returns the rules applied to a specific [Path], given the [WorkspaceSettings]
-pub fn to_analyzer_rules(settings: &WorkspaceSettings, path: &Path) -> AnalyzerRules {
+/// Returns the rules applied to a specific [Path], given the [Settings]
+pub fn to_analyzer_rules(settings: &Settings, path: &Path) -> AnalyzerRules {
     let linter_settings = &settings.linter;
     let overrides = &settings.override_settings;
     let mut analyzer_rules = AnalyzerRules::default();
@@ -427,7 +450,7 @@ impl PartialConfigurationExt for PartialConfiguration {
             } else {
                 fs.resolve_configuration(extend_entry.as_str(), external_resolution_base_path)
                     .map_err(|error| {
-                        ConfigurationDiagnostic::cant_resolve(
+                        BiomeDiagnostic::cant_resolve(
                             external_resolution_base_path.display().to_string(),
                             error,
                         )
@@ -485,13 +508,6 @@ impl PartialConfigurationExt for PartialConfiguration {
     /// configuration to apply them to the new schema.
     fn migrate_deprecated_fields(&mut self) {
         // TODO: remove in biome 2.0
-        if let Some(formatter) = self.css.as_mut().and_then(|css| css.formatter.as_mut()) {
-            if formatter.indent_size.is_some() && formatter.indent_width.is_none() {
-                formatter.indent_width = formatter.indent_size;
-            }
-        }
-
-        // TODO: remove in biome 2.0
         if let Some(formatter) = self.formatter.as_mut() {
             if formatter.indent_size.is_some() && formatter.indent_width.is_none() {
                 formatter.indent_width = formatter.indent_size;
@@ -506,6 +522,10 @@ impl PartialConfigurationExt for PartialConfiguration {
         {
             if formatter.indent_size.is_some() && formatter.indent_width.is_none() {
                 formatter.indent_width = formatter.indent_size;
+            }
+
+            if formatter.trailing_comma.is_some() && formatter.trailing_commas.is_none() {
+                formatter.trailing_commas = formatter.trailing_comma;
             }
         }
 

@@ -1,5 +1,4 @@
 #![deny(rustdoc::broken_intra_doc_links)]
-#![doc = include_str!("../CONTRIBUTING.md")]
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -17,6 +16,7 @@ mod registry;
 mod rule;
 mod services;
 mod signals;
+mod suppression_action;
 mod syntax;
 mod visitor;
 
@@ -45,6 +45,7 @@ pub use crate::signals::{
 };
 pub use crate::syntax::{Ast, SyntaxVisitor};
 pub use crate::visitor::{NodeVisitor, Visitor, VisitorContext, VisitorFinishContext};
+pub use suppression_action::{ApplySuppression, SuppressionAction};
 
 use biome_console::markup;
 use biome_diagnostics::{
@@ -71,7 +72,7 @@ pub struct Analyzer<'analyzer, L: Language, Matcher, Break, Diag> {
     /// Language-specific suppression comment parsing function
     parse_suppression_comment: SuppressionParser<Diag>,
     /// Language-specific suppression comment emitter
-    apply_suppression_comment: SuppressionCommentEmitter<L>,
+    suppression_action: Box<dyn SuppressionAction<Language = L>>,
     /// Handles analyzer signals emitted by individual rules
     emit_signal: SignalHandler<'analyzer, L, Break>,
 }
@@ -95,7 +96,7 @@ where
         metadata: &'analyzer MetadataRegistry,
         query_matcher: Matcher,
         parse_suppression_comment: SuppressionParser<Diag>,
-        apply_suppression_comment: SuppressionCommentEmitter<L>,
+        suppression_action: Box<dyn SuppressionAction<Language = L>>,
         emit_signal: SignalHandler<'analyzer, L, Break>,
     ) -> Self {
         Self {
@@ -103,7 +104,7 @@ where
             metadata,
             query_matcher,
             parse_suppression_comment,
-            apply_suppression_comment,
+            suppression_action,
             emit_signal,
         }
     }
@@ -124,7 +125,7 @@ where
             mut query_matcher,
             parse_suppression_comment,
             mut emit_signal,
-            apply_suppression_comment,
+            suppression_action,
         } = self;
 
         let mut line_index = 0;
@@ -144,7 +145,7 @@ where
                 root: &ctx.root,
                 services: &ctx.services,
                 range: ctx.range,
-                apply_suppression_comment,
+                suppression_action: suppression_action.as_ref(),
                 options: ctx.options,
             };
 
@@ -209,7 +210,7 @@ struct PhaseRunner<'analyzer, 'phase, L: Language, Matcher, Break, Diag> {
     /// Language-specific suppression comment parsing function
     parse_suppression_comment: SuppressionParser<Diag>,
     /// Language-specific suppression comment emitter
-    apply_suppression_comment: SuppressionCommentEmitter<L>,
+    suppression_action: &'phase dyn SuppressionAction<Language = L>,
     /// Line index at the current position of the traversal
     line_index: &'phase mut usize,
     /// Track active suppression comments per-line, ordered by line index
@@ -241,6 +242,8 @@ struct LineSuppression {
     /// List of all the rules this comment has started suppressing (must be
     /// removed from the suppressed set on expiration)
     suppressed_rules: Vec<RuleFilter<'static>>,
+    /// List of all the rule instances this comment has started suppressing.
+    suppressed_instances: Vec<(RuleFilter<'static>, String)>,
     /// Set to `true` when a signal matching this suppression was emitted and
     /// suppressed
     did_suppress_signal: bool,
@@ -281,7 +284,7 @@ where
                     range: self.range,
                     query_matcher: self.query_matcher,
                     signal_queue: &mut self.signal_queue,
-                    apply_suppression_comment: self.apply_suppression_comment,
+                    suppression_action: self.suppression_action,
                     options: self.options,
                 };
 
@@ -306,7 +309,7 @@ where
                     range: self.range,
                     query_matcher: self.query_matcher,
                     signal_queue: &mut self.signal_queue,
-                    apply_suppression_comment: self.apply_suppression_comment,
+                    suppression_action: self.suppression_action,
                     options: self.options,
                 };
 
@@ -405,10 +408,24 @@ where
                     return true;
                 }
 
-                suppression
+                if suppression
                     .suppressed_rules
                     .iter()
                     .any(|filter| *filter == entry.rule)
+                {
+                    return true;
+                }
+
+                if entry.instances.is_empty() {
+                    return false;
+                }
+
+                entry.instances.iter().all(|value| {
+                    suppression
+                        .suppressed_instances
+                        .iter()
+                        .any(|(filter, v)| *filter == entry.rule && v == value)
+                })
             });
 
             // If the signal is being suppressed mark the line suppression as
@@ -419,9 +436,8 @@ where
                 (self.emit_signal)(&*entry.signal)?;
             }
 
-            // SAFETY: This removes `query` from the queue, it is known to
-            // exist since the `while let Some` block was entered
-            self.signal_queue.pop().unwrap();
+            // Remove signal from the queue.
+            self.signal_queue.pop();
         }
 
         ControlFlow::Continue(())
@@ -438,7 +454,8 @@ where
         range: TextRange,
     ) -> ControlFlow<Break> {
         let mut suppress_all = false;
-        let mut suppressions = Vec::new();
+        let mut suppressed_rules = Vec::new();
+        let mut suppressed_instances = Vec::new();
         let mut has_legacy = false;
 
         for result in (self.parse_suppression_comment)(text) {
@@ -472,18 +489,16 @@ where
                 (self.emit_signal)(&signal)?;
             }
 
-            let rule = match kind {
-                SuppressionKind::Everything => None,
-                SuppressionKind::Rule(rule) => Some(rule),
-                SuppressionKind::MaybeLegacy(rule) => Some(rule),
-                SuppressionKind::Deprecated => None,
+            let (rule, instance) = match kind {
+                SuppressionKind::Everything => (None, None),
+                SuppressionKind::Rule(rule) => (Some(rule), None),
+                SuppressionKind::RuleInstance(rule, instance) => (Some(rule), Some(instance)),
+                SuppressionKind::MaybeLegacy(rule) => (Some(rule), None),
+                SuppressionKind::Deprecated => (None, None),
             };
 
             if let Some(rule) = rule {
-                let group_rule = rule.find('/').map(|index| {
-                    let (start, end) = rule.split_at(index);
-                    (start, &end[1..])
-                });
+                let group_rule = rule.split_once('/');
 
                 let key = match group_rule {
                     None => self.metadata.find_group(rule).map(RuleFilter::from),
@@ -492,29 +507,38 @@ where
                     }
                 };
 
-                if let Some(key) = key {
-                    suppressions.push(key);
-                    has_legacy |= matches!(kind, SuppressionKind::MaybeLegacy(_));
-                } else if range_match(self.range, range) {
-                    // Emit a warning for the unknown rule
-                    let signal = DiagnosticSignal::new(move || match group_rule {
-                        Some((group, rule)) => SuppressionDiagnostic::new(
-                            category!("suppressions/unknownRule"),
-                            range,
-                            format_args!("Unknown lint rule {group}/{rule} in suppression comment"),
-                        ),
+                match (key, instance) {
+                    (Some(key), Some(value)) => suppressed_instances.push((key, value.to_owned())),
+                    (Some(key), None) => {
+                        suppressed_rules.push(key);
+                        has_legacy |= matches!(kind, SuppressionKind::MaybeLegacy(_));
+                    }
+                    _ if range_match(self.range, range) => {
+                        // Emit a warning for the unknown rule
+                        let signal = DiagnosticSignal::new(move || match group_rule {
+                            Some((group, rule)) => SuppressionDiagnostic::new(
+                                category!("suppressions/unknownRule"),
+                                range,
+                                format_args!(
+                                    "Unknown lint rule {group}/{rule} in suppression comment"
+                                ),
+                            ),
 
-                        None => SuppressionDiagnostic::new(
-                            category!("suppressions/unknownGroup"),
-                            range,
-                            format_args!("Unknown lint rule group {rule} in suppression comment"),
-                        ),
-                    });
+                            None => SuppressionDiagnostic::new(
+                                category!("suppressions/unknownGroup"),
+                                range,
+                                format_args!(
+                                    "Unknown lint rule group {rule} in suppression comment"
+                                ),
+                            ),
+                        });
 
-                    (self.emit_signal)(&signal)?;
+                        (self.emit_signal)(&signal)?;
+                    }
+                    _ => {}
                 }
             } else {
-                suppressions.clear();
+                suppressed_rules.clear();
                 suppress_all = true;
                 // If this if a "suppress all lints" comment, no need to
                 // parse anything else
@@ -539,7 +563,7 @@ where
             (self.emit_signal)(&signal)?;
         }
 
-        if !suppress_all && suppressions.is_empty() {
+        if !suppress_all && suppressed_rules.is_empty() && suppressed_instances.is_empty() {
             return ControlFlow::Continue(());
         }
 
@@ -547,7 +571,7 @@ where
         let line_index = *self.line_index + 1;
 
         // If the last suppression was on the same or previous line, extend its
-        // range and set of supressed rules with the content for the new suppression
+        // range and set of suppressed rules with the content for the new suppression
         if let Some(last_suppression) = self.line_suppressions.last_mut() {
             if last_suppression.line_index == line_index
                 || last_suppression.line_index + 1 == line_index
@@ -556,9 +580,13 @@ where
                 last_suppression.text_range = last_suppression.text_range.cover(range);
                 last_suppression.suppress_all |= suppress_all;
                 if !last_suppression.suppress_all {
-                    last_suppression.suppressed_rules.extend(suppressions);
+                    last_suppression.suppressed_rules.extend(suppressed_rules);
+                    last_suppression
+                        .suppressed_instances
+                        .extend(suppressed_instances);
                 } else {
                     last_suppression.suppressed_rules.clear();
+                    last_suppression.suppressed_instances.clear();
                 }
                 return ControlFlow::Continue(());
             }
@@ -569,7 +597,8 @@ where
             comment_span: range,
             text_range: range,
             suppress_all,
-            suppressed_rules: suppressions,
+            suppressed_rules,
+            suppressed_instances,
             did_suppress_signal: false,
         };
 
@@ -669,21 +698,24 @@ fn range_match(filter: Option<TextRange>, range: TextRange) -> bool {
 ///
 /// # Examples
 ///
-/// - `// rome-ignore format` -> `vec![]`
-/// - `// rome-ignore lint` -> `vec![Everything]`
-/// - `// rome-ignore lint/style/useWhile` -> `vec![Rule("style/useWhile")]`
-/// - `// rome-ignore lint/style/useWhile lint/nursery/noUnreachable` -> `vec![Rule("style/useWhile"), Rule("nursery/noUnreachable")]`
-/// - `// rome-ignore lint(style/useWhile)` -> `vec![MaybeLegacy("style/useWhile")]`
-/// - `// rome-ignore lint(style/useWhile) lint(nursery/noUnreachable)` -> `vec![MaybeLegacy("style/useWhile"), MaybeLegacy("nursery/noUnreachable")]`
+/// - `// biome-ignore format` -> `vec![]`
+/// - `// biome-ignore lint` -> `vec![Everything]`
+/// - `// biome-ignore lint/style/useWhile` -> `vec![Rule("style/useWhile")]`
+/// - `// biome-ignore lint/style/useWhile(foo)` -> `vec![RuleWithValue("style/useWhile", "foo")]`
+/// - `// biome-ignore lint/style/useWhile lint/nursery/noUnreachable` -> `vec![Rule("style/useWhile"), Rule("nursery/noUnreachable")]`
+/// - `// biome-ignore lint(style/useWhile)` -> `vec![MaybeLegacy("style/useWhile")]`
+/// - `// biome-ignore lint(style/useWhile) lint(nursery/noUnreachable)` -> `vec![MaybeLegacy("style/useWhile"), MaybeLegacy("nursery/noUnreachable")]`
 type SuppressionParser<D> = fn(&str) -> Vec<Result<SuppressionKind, D>>;
 
 /// This enum is used to categorize what is disabled by a suppression comment and with what syntax
 pub enum SuppressionKind<'a> {
-    /// A suppression disabling all lints eg. `// rome-ignore lint`
+    /// A suppression disabling all lints eg. `// biome-ignore lint`
     Everything,
-    /// A suppression disabling a specific rule eg. `// rome-ignore lint/style/useWhile`
+    /// A suppression disabling a specific rule eg. `// biome-ignore lint/style/useWhile`
     Rule(&'a str),
-    /// A suppression using the legacy syntax to disable a specific rule eg. `// rome-ignore lint(style/useWhile)`
+    /// A suppression to be evaluated by a specific rule eg. `// biome-ignore lint/correctness/useExhaustiveDependencies(foo)`
+    RuleInstance(&'a str, &'a str),
+    /// A suppression using the legacy syntax to disable a specific rule eg. `// biome-ignore lint(style/useWhile)`
     MaybeLegacy(&'a str),
     /// `rome-ignore` is legacy
     Deprecated,
@@ -756,9 +788,6 @@ pub struct SuppressionCommentEmitterPayload<'a, L: Language> {
     pub diagnostic_text_range: &'a TextRange,
 }
 
-/// Convenient type that to mark a function that is responsible to create a mutation to add a suppression comment.
-type SuppressionCommentEmitter<L> = fn(SuppressionCommentEmitterPayload<L>);
-
 type SignalHandler<'a, L, Break> = &'a mut dyn FnMut(&dyn AnalyzerSignal<L>) -> ControlFlow<Break>;
 
 /// Allow filtering a single rule or group of rules by their names
@@ -768,7 +797,14 @@ pub enum RuleFilter<'a> {
     Rule(&'a str, &'a str),
 }
 
-impl RuleFilter<'_> {
+impl<'a> RuleFilter<'a> {
+    // Returns the group name of this filter.
+    pub fn group(self) -> &'a str {
+        match self {
+            RuleFilter::Group(group) => group,
+            RuleFilter::Rule(group, _) => group,
+        }
+    }
     /// Return `true` if the group `G` matches this filter
     fn match_group<G: RuleGroup>(self) -> bool {
         match self {
@@ -810,6 +846,19 @@ impl<'a> Display for RuleFilter<'a> {
     }
 }
 
+impl<'a> biome_console::fmt::Display for RuleFilter<'a> {
+    fn fmt(&self, fmt: &mut biome_console::fmt::Formatter) -> std::io::Result<()> {
+        match self {
+            RuleFilter::Group(group) => {
+                write!(fmt, "{group}")
+            }
+            RuleFilter::Rule(group, rule) => {
+                write!(fmt, "{group}/{rule}")
+            }
+        }
+    }
+}
+
 /// Allows filtering the list of rules that will be executed in a run of the analyzer,
 /// and at what source code range signals (diagnostics or actions) may be raised
 #[derive(Debug, Default, Clone, Copy)]
@@ -817,14 +866,23 @@ pub struct AnalysisFilter<'a> {
     /// Only allow rules with these categories to emit signals
     pub categories: RuleCategories,
     /// Only allow rules matching these names to emit signals
+    /// If `enabled_rules` is set to `None`, then all rules are enabled.
     pub enabled_rules: Option<&'a [RuleFilter<'a>]>,
     /// Do not allow rules matching these names to emit signals
-    pub disabled_rules: Option<&'a [RuleFilter<'a>]>,
+    pub disabled_rules: &'a [RuleFilter<'a>],
     /// Only emit signals matching this text range
     pub range: Option<TextRange>,
 }
 
 impl<'analysis> AnalysisFilter<'analysis> {
+    /// It creates a new filter with the set of [enabled rules](RuleFilter) passed as argument
+    pub fn from_enabled_rules(enabled_rules: &'analysis [RuleFilter<'analysis>]) -> Self {
+        Self {
+            enabled_rules: Some(enabled_rules),
+            ..AnalysisFilter::default()
+        }
+    }
+
     /// Return `true` if the category `C` matches this filter
     pub fn match_category<C: GroupCategory>(&self) -> bool {
         self.categories.contains(C::CATEGORY.into())
@@ -836,33 +894,22 @@ impl<'analysis> AnalysisFilter<'analysis> {
             && self.enabled_rules.map_or(true, |enabled_rules| {
                 enabled_rules.iter().any(|filter| filter.match_group::<G>())
             })
-            && self.disabled_rules.map_or(true, |disabled_rules| {
-                !disabled_rules
-                    .iter()
-                    .any(|filter| filter.match_group::<G>())
-            })
+            && !self
+                .disabled_rules
+                .iter()
+                .any(|filter| matches!(filter, RuleFilter::Group(_)) && filter.match_group::<G>())
     }
 
     /// Return `true` if the rule `R` matches this filter
-    pub fn match_rule<R>(&self) -> bool
-    where
-        R: Rule,
-    {
-        self.match_group::<R::Group>()
+    pub fn match_rule<R: Rule>(&self) -> bool {
+        self.match_category::<<R::Group as RuleGroup>::Category>()
             && self.enabled_rules.map_or(true, |enabled_rules| {
                 enabled_rules.iter().any(|filter| filter.match_rule::<R>())
             })
-            && self.disabled_rules.map_or(true, |disabled_rules| {
-                !disabled_rules.iter().any(|filter| filter.match_rule::<R>())
-            })
-    }
-
-    /// It creates a new filter with the set of [enabled rules](RuleFilter) passed as argument
-    pub fn from_enabled_rules(enabled_rules: Option<&'analysis [RuleFilter<'analysis>]>) -> Self {
-        Self {
-            enabled_rules,
-            ..AnalysisFilter::default()
-        }
+            && !self
+                .disabled_rules
+                .iter()
+                .any(|filter| filter.match_rule::<R>())
     }
 }
 

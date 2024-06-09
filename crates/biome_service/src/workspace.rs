@@ -55,14 +55,17 @@ use crate::file_handlers::Capabilities;
 use crate::{Deserialize, Serialize, WorkspaceError};
 use biome_analyze::ActionCategory;
 pub use biome_analyze::RuleCategories;
+use biome_configuration::linter::RuleSelector;
 use biome_configuration::PartialConfiguration;
 use biome_console::{markup, Markup, MarkupBuf};
-use biome_css_formatter::can_format_css_yet;
 use biome_diagnostics::CodeSuggestion;
 use biome_formatter::Printed;
 use biome_fs::BiomePath;
 use biome_js_syntax::{TextRange, TextSize};
 use biome_text_edit::TextEdit;
+#[cfg(feature = "schema")]
+use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
+use slotmap::{new_key_type, DenseSlotMap};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -71,7 +74,7 @@ use tracing::debug;
 
 pub use self::client::{TransportRequest, WorkspaceClient, WorkspaceTransport};
 pub use crate::file_handlers::DocumentFileSource;
-use crate::settings::WorkspaceSettings;
+use crate::settings::Settings;
 
 mod client;
 mod server;
@@ -149,7 +152,7 @@ impl FileFeaturesResult {
 
     pub(crate) fn with_settings_and_language(
         mut self,
-        settings: &WorkspaceSettings,
+        settings: &Settings,
         file_source: &DocumentFileSource,
         path: &Path,
     ) -> Self {
@@ -161,9 +164,7 @@ impl FileFeaturesResult {
             } else if file_source.is_json_like() {
                 !settings.formatter().enabled || settings.json_formatter_disabled()
             } else if file_source.is_css_like() {
-                !can_format_css_yet()
-                    || !settings.formatter().enabled
-                    || settings.css_formatter_disabled()
+                !settings.formatter().enabled || settings.css_formatter_disabled()
             } else {
                 !settings.formatter().enabled
             };
@@ -172,12 +173,21 @@ impl FileFeaturesResult {
                 .insert(FeatureName::Format, SupportKind::FeatureNotEnabled);
         }
         // linter
-        if let Some(disabled) = settings.override_settings.linter_disabled(path) {
-            if disabled {
-                self.features_supported
-                    .insert(FeatureName::Lint, SupportKind::FeatureNotEnabled);
+        let linter_disabled = {
+            if let Some(disabled) = settings.override_settings.linter_disabled(path) {
+                disabled
+            } else if file_source.is_javascript_like() {
+                !settings.linter().enabled || settings.javascript_linter_disabled()
+            } else if file_source.is_json_like() {
+                !settings.linter().enabled || settings.json_linter_disabled()
+            } else if file_source.is_css_like() {
+                !settings.linter().enabled || settings.css_linter_disabled()
+            } else {
+                !settings.linter().enabled
             }
-        } else if !settings.linter().enabled {
+        };
+
+        if linter_disabled {
             self.features_supported
                 .insert(FeatureName::Lint, SupportKind::FeatureNotEnabled);
         }
@@ -405,7 +415,7 @@ pub struct UpdateSettingsParams {
     pub vcs_base_path: Option<PathBuf>,
     // @ematipico TODO: have a better data structure for this
     pub gitignore_matches: Vec<String>,
-    pub working_directory: Option<PathBuf>,
+    pub workspace_directory: Option<PathBuf>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -492,6 +502,8 @@ pub struct PullDiagnosticsParams {
     pub path: BiomePath,
     pub categories: RuleCategories,
     pub max_diagnostics: u64,
+    pub only: Vec<RuleSelector>,
+    pub skip: Vec<RuleSelector>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -543,7 +555,7 @@ pub struct FormatOnTypeParams {
     pub offset: TextSize,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Which fixes should be applied during the analyzing phase
 pub enum FixFileMode {
@@ -731,6 +743,21 @@ pub struct IsPathIgnoredParams {
     pub features: Vec<FeatureName>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterProjectFolderParams {
+    pub path: Option<PathBuf>,
+    pub set_as_current_workspace: bool,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterProjectFolderParams {
+    pub path: BiomePath,
+}
+
 pub trait Workspace: Send + Sync + RefUnwindSafe {
     /// Checks whether a certain feature is supported. There are different conditions:
     /// - Biome doesn't recognize a file, so it can't provide the feature;
@@ -746,7 +773,7 @@ pub trait Workspace: Send + Sync + RefUnwindSafe {
     /// Takes as input the path of the file that workspace is currently processing and
     /// a list of paths to match against.
     ///
-    /// If the file path matches, than `true` is returned and it should be considered ignored.
+    /// If the file path matches, then `true` is returned, and it should be considered ignored.
     fn is_path_ignored(&self, params: IsPathIgnoredParams) -> Result<bool, WorkspaceError>;
 
     /// Update the global settings for this workspace
@@ -757,6 +784,18 @@ pub trait Workspace: Send + Sync + RefUnwindSafe {
 
     /// Add a new project to the workspace
     fn open_project(&self, params: OpenProjectParams) -> Result<(), WorkspaceError>;
+
+    /// Register a possible workspace project folder. Returns the key of said project. Use this key when you want to switch to different projects.
+    fn register_project_folder(
+        &self,
+        params: RegisterProjectFolderParams,
+    ) -> Result<ProjectKey, WorkspaceError>;
+
+    /// Unregister a workspace project folder. The settings that belong to that project are deleted.
+    fn unregister_project_folder(
+        &self,
+        params: UnregisterProjectFolderParams,
+    ) -> Result<(), WorkspaceError>;
 
     /// Sets the current project path
     fn update_current_project(&self, params: UpdateProjectParams) -> Result<(), WorkspaceError>;
@@ -904,11 +943,15 @@ impl<'app, W: Workspace + ?Sized> FileGuard<'app, W> {
         &self,
         categories: RuleCategories,
         max_diagnostics: u32,
+        only: Vec<RuleSelector>,
+        skip: Vec<RuleSelector>,
     ) -> Result<PullDiagnosticsResult, WorkspaceError> {
         self.workspace.pull_diagnostics(PullDiagnosticsParams {
             path: self.path.clone(),
             categories,
             max_diagnostics: max_diagnostics.into(),
+            only,
+            skip,
         })
     }
 
@@ -982,5 +1025,78 @@ impl<'app, W: Workspace + ?Sized> Drop for FileGuard<'app, W> {
 fn test_order() {
     for items in FileFeaturesResult::PROTECTED_FILES.windows(2) {
         assert!(items[0] < items[1], "{} < {}", items[0], items[1]);
+    }
+}
+
+new_key_type! {
+    pub struct ProjectKey;
+}
+
+#[cfg(feature = "schema")]
+impl JsonSchema for ProjectKey {
+    fn schema_name() -> String {
+        "ProjectKey".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        <String>::json_schema(gen)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WorkspaceData<V> {
+    /// [DenseSlotMap] is the slowest type in insertion/removal, but the fastest in iteration
+    ///
+    /// Users wouldn't change workspace folders very often,
+    paths: DenseSlotMap<ProjectKey, V>,
+}
+
+impl<V> WorkspaceData<V> {
+    /// Inserts an item
+    pub fn insert(&mut self, item: V) -> ProjectKey {
+        self.paths.insert(item)
+    }
+
+    /// Removes an item
+    pub fn remove(&mut self, key: ProjectKey) {
+        self.paths.remove(key);
+    }
+
+    /// Get a reference of the value
+    pub fn get(&self, key: ProjectKey) -> Option<&V> {
+        self.paths.get(key)
+    }
+
+    /// Get a mutable reference of the value
+    pub fn get_mut(&mut self, key: ProjectKey) -> Option<&mut V> {
+        self.paths.get_mut(key)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn iter(&self) -> WorkspaceDataIterator<'_, V> {
+        WorkspaceDataIterator::new(self)
+    }
+}
+
+pub struct WorkspaceDataIterator<'a, V> {
+    iterator: slotmap::dense::Iter<'a, ProjectKey, V>,
+}
+
+impl<'a, V> WorkspaceDataIterator<'a, V> {
+    fn new(data: &'a WorkspaceData<V>) -> Self {
+        Self {
+            iterator: data.paths.iter(),
+        }
+    }
+}
+
+impl<'a, V> Iterator for WorkspaceDataIterator<'a, V> {
+    type Item = (ProjectKey, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator.next()
     }
 }

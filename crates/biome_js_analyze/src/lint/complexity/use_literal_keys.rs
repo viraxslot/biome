@@ -4,14 +4,13 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make::{
     self, ident, js_literal_member_name, js_name, js_static_member_assignment,
     js_static_member_expression, token,
 };
 use biome_js_syntax::{
     AnyJsAssignment, AnyJsComputedMember, AnyJsMemberExpression, AnyJsName, AnyJsObjectMemberName,
-    JsComputedMemberName, JsLiteralMemberName, JsSyntaxKind, T,
+    JsComputedMemberName, T,
 };
 use biome_rowan::{declare_node_union, AstNode, BatchMutationExt, TextRange};
 use biome_unicode_table::is_js_ident;
@@ -51,6 +50,7 @@ declare_rule! {
     pub UseLiteralKeys {
         version: "1.0.0",
         name: "useLiteralKeys",
+        language: "js",
         sources: &[
             RuleSource::Eslint("dot-notation"),
             RuleSource::EslintTypeScript("dot-notation")
@@ -70,15 +70,6 @@ impl Rule for UseLiteralKeys {
         let node = ctx.query();
         let inner_expression = match node {
             AnyJsMember::AnyJsComputedMember(computed_member) => computed_member.member().ok()?,
-            AnyJsMember::JsLiteralMemberName(member) => {
-                if member.value().ok()?.kind() == JsSyntaxKind::JS_STRING_LITERAL {
-                    let name = member.name().ok()?;
-                    if is_js_ident(&name) {
-                        return Some((member.range(), name.to_string()));
-                    }
-                }
-                return None;
-            }
             AnyJsMember::JsComputedMemberName(member) => member.expression().ok()?,
         };
         let value = inner_expression.as_static_value()?;
@@ -86,7 +77,7 @@ impl Rule for UseLiteralKeys {
         // `{["__proto__"]: null }` and `{"__proto__": null}`/`{"__proto__": null}`
         // have different semantic.
         // The first is a regular property.
-        // The second is a specical property that changes the object prototype.
+        // The second is a special property that changes the object prototype.
         // See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/proto
         if matches!(node, AnyJsMember::JsComputedMemberName(_)) && value == "__proto__" {
             return None;
@@ -142,13 +133,8 @@ impl Rule for UseLiteralKeys {
                     }
                 }
             }
-            AnyJsMember::JsLiteralMemberName(node) => {
-                mutation.replace_token(node.value().ok()?, make::ident(identifier));
-            }
             AnyJsMember::JsComputedMemberName(member) => {
-                let name_token = if is_js_ident(identifier) {
-                    make::ident(identifier)
-                } else if ctx.as_preferred_quote().is_double() {
+                let name_token = if ctx.as_preferred_quote().is_double() {
                     make::js_string_literal(identifier)
                 } else {
                     make::js_string_literal_single_quotes(identifier)
@@ -160,18 +146,18 @@ impl Rule for UseLiteralKeys {
                 );
             }
         }
-        Some(JsRuleAction {
-            mutation,
-            applicability: Applicability::MaybeIncorrect,
-            category: ActionCategory::QuickFix,
-            message: markup! {
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! {
                 "Use a literal key instead."
             }
             .to_owned(),
-        })
+            mutation,
+        ))
     }
 }
 
 declare_node_union! {
-    pub AnyJsMember = AnyJsComputedMember | JsLiteralMemberName | JsComputedMemberName
+    pub AnyJsMember = AnyJsComputedMember | JsComputedMemberName
 }

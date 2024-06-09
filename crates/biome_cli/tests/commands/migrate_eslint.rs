@@ -113,6 +113,59 @@ fn migrate_eslintrcjson_write() {
 }
 
 #[test]
+fn migrate_eslintrcjson_fix() {
+    let biomejson = r#"{ "linter": { "enabled": true } }"#;
+    let eslintrc = r#"{
+        "ignorePatterns": [
+            "**/*.test.js", // trailing comma amd comment
+        ],
+        "globals": {
+            "var1": "writable",
+            "var2": "readonly"
+        },
+        "rules": {
+            "dot-notation": 0,
+            "default-param-last": "off",
+            "eqeqeq": "warn",
+            "getter-return": [2,
+                // support unknown options
+                { "allowImplicit": true }
+            ],
+            "no-eval": 1,
+            "no-extra-label": ["error"]
+        },
+        "overrides": [{
+            "files": ["bin/*.js", "lib/*.js"],
+            "excludedFiles": "*.test.js",
+            "rules": {
+                "eqeqeq": ["off"]
+            }
+        }],
+        "unknownField": "ignored"
+    }"#;
+
+    let mut fs = MemoryFileSystem::default();
+    fs.insert(Path::new("biome.json").into(), biomejson.as_bytes());
+    fs.insert(Path::new(".eslintrc.json").into(), eslintrc.as_bytes());
+
+    let mut console = BufferConsole::default();
+    let result = run_cli(
+        DynRef::Borrowed(&mut fs),
+        &mut console,
+        Args::from(["migrate", "eslint", "--fix"].as_slice()),
+    );
+
+    assert!(result.is_ok(), "run_cli returned {result:?}");
+    assert_cli_snapshot(SnapshotPayload::new(
+        module_path!(),
+        "migrate_eslintrcjson_fix",
+        fs,
+        console,
+        result,
+    ));
+}
+
+#[test]
 fn migrate_eslintrcjson_override_existing_config() {
     let biomejson = r#"{ "linter": { "rules": { "recommended": true, "suspicious": { "noDoubleEquals": "error" } } } }"#;
     let eslintrc = r#"{ "rules": { "eqeqeq": "off" } }"#;
@@ -203,7 +256,26 @@ fn migrate_eslintrcjson_rule_options() {
             "@typescript-eslint/array-type": ["error", { "default": "generic" }],
             "@typescript-eslint/naming-convention": ["error",
                 {
+                    "selector": "property",
+                    "leadingUnderscore": "forbid"
+                },
+                {
+                    "selector": "property",
+                    "modifiers": ["private"],
+                    "format": ["strictCamelCase"],
+                    "leadingUnderscore": "require"
+                },
+                {
+                    "selector": "interface",
+                    "prefix": ["I", "IO"]
+                },
+                {
                     "selector": "enumMember",
+                    "format": ["UPPER_CASE"]
+                },
+                {
+                    "selector": "variable",
+                    "types": ["boolean"],
                     "format": ["UPPER_CASE"]
                 }
             ],
@@ -248,7 +320,7 @@ fn migrate_eslintrcjson_rule_options() {
                     "multipleFileExtensions": true
                 }]
             }
-        }],
+        }]
     }"#;
 
     let mut fs = MemoryFileSystem::default();
@@ -262,7 +334,6 @@ fn migrate_eslintrcjson_rule_options() {
         Args::from(["migrate", "eslint", "--include-inspired"].as_slice()),
     );
 
-    assert!(result.is_ok(), "run_cli returned {result:?}");
     assert_cli_snapshot(SnapshotPayload::new(
         module_path!(),
         "migrate_eslintrcjson_rule_options",
@@ -359,7 +430,8 @@ fn migrate_eslint_config_packagejson() {
             "rules": {
                 "eqeqeq": "warn"
             }
-        }
+        },
+        "eslintIgnore": ["/dist", "test", "!test/x/**"]
     }"#;
 
     let mut fs = MemoryFileSystem::default();
@@ -450,7 +522,7 @@ test/main.js
 fn migrate_eslintignore_and_ignore_patterns() {
     let biomejson = r#"{ "linter": { "enabled": true } }"#;
     let eslintrc = r#"{
-        "ignorePatterns": ["**/*.spec.js"],
+        "ignorePatterns": ["**/*.spec.js", "!x.spec.js", "/dist"],
         "rules": { "eqeqeq": "off" }
     }"#;
     let eslintignore = r#"*.test.js"#;

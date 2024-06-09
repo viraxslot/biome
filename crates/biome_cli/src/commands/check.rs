@@ -2,6 +2,7 @@ use crate::cli_options::CliOptions;
 use crate::commands::{
     get_files_to_process, get_stdin, resolve_manifest, validate_configuration_diagnostics,
 };
+use crate::execute::VcsTargeted;
 use crate::{
     execute_mode, setup_cli_subscriber, CliDiagnostic, CliSession, Execution, TraversalMode,
 };
@@ -11,15 +12,21 @@ use biome_configuration::{
 };
 use biome_deserialize::Merge;
 use biome_service::configuration::PartialConfigurationExt;
+use biome_service::workspace::RegisterProjectFolderParams;
 use biome_service::{
     configuration::{load_configuration, LoadedConfiguration},
-    workspace::{FixFileMode, UpdateSettingsParams},
+    workspace::UpdateSettingsParams,
 };
 use std::ffi::OsString;
+
+use super::{determine_fix_file_mode, FixFileModeOptions};
 
 pub(crate) struct CheckCommandPayload {
     pub(crate) apply: bool,
     pub(crate) apply_unsafe: bool,
+    pub(crate) write: bool,
+    pub(crate) fix: bool,
+    pub(crate) unsafe_: bool,
     pub(crate) cli_options: CliOptions,
     pub(crate) configuration: Option<PartialConfiguration>,
     pub(crate) paths: Vec<OsString>,
@@ -40,9 +47,12 @@ pub(crate) fn check(
     let CheckCommandPayload {
         apply,
         apply_unsafe,
+        write,
+        fix,
+        unsafe_,
         cli_options,
         configuration,
-        mut paths,
+        paths,
         stdin_file_path,
         linter_enabled,
         organize_imports_enabled,
@@ -53,18 +63,16 @@ pub(crate) fn check(
     } = payload;
     setup_cli_subscriber(cli_options.log_level, cli_options.log_kind);
 
-    let fix_file_mode = if apply && apply_unsafe {
-        return Err(CliDiagnostic::incompatible_arguments(
-            "--apply",
-            "--apply-unsafe",
-        ));
-    } else if !apply && !apply_unsafe {
-        None
-    } else if apply && !apply_unsafe {
-        Some(FixFileMode::SafeFixes)
-    } else {
-        Some(FixFileMode::SafeAndUnsafeFixes)
-    };
+    let fix_file_mode = determine_fix_file_mode(
+        FixFileModeOptions {
+            apply,
+            apply_unsafe,
+            write,
+            fix,
+            unsafe_,
+        },
+        session.app.console,
+    )?;
 
     let loaded_configuration =
         load_configuration(&session.app.fs, cli_options.as_configuration_path_hint())?;
@@ -73,6 +81,20 @@ pub(crate) fn check(
         session.app.console,
         cli_options.verbose,
     )?;
+    // let fs = &session.app.fs;
+    // let (editorconfig, editorconfig_diagnostics) = {
+    //     let search_path = loaded_configuration
+    //         .directory_path
+    //         .clone()
+    //         .unwrap_or_else(|| fs.working_directory().unwrap_or_default());
+    //     load_editorconfig(fs, search_path)?
+    // };
+    // for diagnostic in editorconfig_diagnostics {
+    //     session.app.console.error(markup! {
+    //         {PrintDiagnostic::simple(&diagnostic)}
+    //     })
+    // }
+
     resolve_manifest(&session)?;
 
     let LoadedConfiguration {
@@ -80,6 +102,13 @@ pub(crate) fn check(
         directory_path: configuration_path,
         ..
     } = loaded_configuration;
+    // let mut fs_configuration = if let Some(mut fs_configuration) = editorconfig {
+    //     // this makes biome configuration take precedence over editorconfig configuration
+    //     fs_configuration.merge_with(biome_configuration);
+    //     fs_configuration
+    // } else {
+    //     biome_configuration
+    // };
 
     let formatter = fs_configuration
         .formatter
@@ -123,17 +152,22 @@ pub(crate) fn check(
 
     let stdin = get_stdin(stdin_file_path, &mut *session.app.console, "check")?;
 
-    if let Some(_paths) =
-        get_files_to_process(since, changed, staged, &session.app.fs, &fs_configuration)?
-    {
-        paths = _paths;
-    }
+    let vcs_targeted_paths =
+        get_files_to_process(since, changed, staged, &session.app.fs, &fs_configuration)?;
+
+    session
+        .app
+        .workspace
+        .register_project_folder(RegisterProjectFolderParams {
+            path: session.app.fs.working_directory(),
+            set_as_current_workspace: true,
+        })?;
 
     session
         .app
         .workspace
         .update_settings(UpdateSettingsParams {
-            working_directory: session.app.fs.working_directory(),
+            workspace_directory: session.app.fs.working_directory(),
             configuration: fs_configuration,
             vcs_base_path,
             gitignore_matches,
@@ -143,10 +177,11 @@ pub(crate) fn check(
         Execution::new(TraversalMode::Check {
             fix_file_mode,
             stdin,
+            vcs_targeted: VcsTargeted { staged, changed },
         })
         .set_report(&cli_options),
         session,
         &cli_options,
-        paths,
+        vcs_targeted_paths.unwrap_or(paths),
     )
 }

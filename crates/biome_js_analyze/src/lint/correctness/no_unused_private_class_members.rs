@@ -3,7 +3,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{
     AnyJsClassMember, AnyJsClassMemberName, AnyJsFormalParameter, AnyJsName,
     JsAssignmentExpression, JsAssignmentOperator, JsClassDeclaration, JsSyntaxKind, JsSyntaxNode,
@@ -64,6 +63,7 @@ declare_rule! {
     pub NoUnusedPrivateClassMembers {
         version: "1.3.3",
         name: "noUnusedPrivateClassMembers",
+        language: "js",
         sources: &[RuleSource::Eslint("no-unused-private-class-members")],
         recommended: false,
         fix_kind: FixKind::Unsafe,
@@ -106,12 +106,12 @@ impl Rule for NoUnusedPrivateClassMembers {
 
         mutation.remove_node(state.clone());
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove unused declaration." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove unused declaration." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

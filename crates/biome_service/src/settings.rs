@@ -1,11 +1,11 @@
-use crate::workspace::DocumentFileSource;
+use crate::workspace::{DocumentFileSource, ProjectKey, WorkspaceData};
 use crate::{Matcher, WorkspaceError};
-use biome_analyze::AnalyzerRules;
+use biome_analyze::{AnalyzerOptions, AnalyzerRules};
 use biome_configuration::diagnostics::InvalidIgnorePattern;
 use biome_configuration::javascript::JsxRuntime;
 use biome_configuration::organize_imports::OrganizeImports;
 use biome_configuration::{
-    push_to_analyzer_rules, ConfigurationDiagnostic, CssConfiguration, FilesConfiguration,
+    push_to_analyzer_rules, BiomeDiagnostic, CssConfiguration, FilesConfiguration,
     FormatterConfiguration, JavascriptConfiguration, JsonConfiguration, LinterConfiguration,
     OverrideFormatterConfiguration, OverrideLinterConfiguration,
     OverrideOrganizeImportsConfiguration, Overrides, PartialConfiguration, PartialCssConfiguration,
@@ -30,14 +30,126 @@ use indexmap::IndexSet;
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::RwLockWriteGuard;
 use std::{
     num::NonZeroU64,
     sync::{RwLock, RwLockReadGuard},
 };
+use tracing::trace;
+
+#[derive(Debug, Default)]
+/// The information tracked for each project
+pub struct ProjectData {
+    /// The root path of the project. This path should be **absolute**.
+    path: BiomePath,
+    /// The settings of the project, usually inferred from the configuration file e.g. `biome.json`.
+    settings: Settings,
+}
+
+#[derive(Debug, Default)]
+/// Type that manages different projects inside the workspace.
+pub struct WorkspaceSettings {
+    /// The data of the projects
+    data: WorkspaceData<ProjectData>,
+    /// The ID of the current project.
+    current_project: ProjectKey,
+}
+
+impl WorkspaceSettings {
+    /// Retrieves the settings of the current workspace folder
+    pub fn get_current_settings(&self) -> Option<&Settings> {
+        trace!("Current key {:?}", self.current_project);
+        let data = self.data.get(self.current_project);
+        if let Some(data) = data {
+            Some(&data.settings)
+        } else {
+            None
+        }
+    }
+
+    /// Retrieves a mutable reference of the settings of the current project
+    pub fn get_current_settings_mut(&mut self) -> &mut Settings {
+        &mut self
+            .data
+            .get_mut(self.current_project)
+            .expect("You must have at least one workspace.")
+            .settings
+    }
+
+    /// Register the current project using its unique key
+    pub fn register_current_project(&mut self, key: ProjectKey) {
+        self.current_project = key;
+    }
+
+    /// Insert a new project using its folder. Use [WorkspaceSettings::get_current_settings_mut] to retrieve
+    /// a mutable reference to its [Settings] and manipulate them.
+    pub fn insert_project(&mut self, workspace_path: impl Into<PathBuf>) -> ProjectKey {
+        let path = BiomePath::new(workspace_path.into());
+        trace!("Insert workspace folder: {:?}", path);
+        self.data.insert(ProjectData {
+            path,
+            settings: Settings::default(),
+        })
+    }
+
+    /// Remove a project using its folder.
+    pub fn remove_project(&mut self, workspace_path: &Path) {
+        let keys_to_remove = {
+            let mut data = vec![];
+            let iter = self.data.iter();
+
+            for (key, path_to_settings) in iter {
+                if path_to_settings.path.as_path() == workspace_path {
+                    data.push(key)
+                }
+            }
+
+            data
+        };
+
+        for key in keys_to_remove {
+            self.data.remove(key)
+        }
+    }
+
+    /// Checks if the current path belongs to a registered project.
+    ///
+    /// If there's a match, and the match **isn't** the current project, it returns the new key.
+    pub fn path_belongs_to_current_workspace(&self, path: &BiomePath) -> Option<ProjectKey> {
+        if self.data.is_empty() {
+            return None;
+        }
+        trace!("Current key: {:?}", self.current_project);
+        let iter = self.data.iter();
+        for (key, path_to_settings) in iter {
+            trace!(
+                "Workspace path {:?}, file path {:?}",
+                path_to_settings.path,
+                path
+            );
+            trace!("Iter key: {:?}", key);
+            if key == self.current_project {
+                continue;
+            }
+            if path.strip_prefix(path_to_settings.path.as_path()).is_ok() {
+                trace!("Update workspace to {:?}", key);
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    /// Checks if the current path belongs to a registered project.
+    ///
+    /// If there's a match, and the match **isn't** the current project, the function will mark the match as the current project.
+    pub fn set_current_project(&mut self, new_key: ProjectKey) {
+        self.current_project = new_key;
+    }
+}
 
 /// Global settings for the entire workspace
 #[derive(Debug, Default)]
-pub struct WorkspaceSettings {
+pub struct Settings {
     /// Formatter settings applied to all files in the workspaces
     pub formatter: FormatSettings,
     /// Linter settings applied to all files in the workspace
@@ -52,40 +164,7 @@ pub struct WorkspaceSettings {
     pub override_settings: OverrideSettings,
 }
 
-impl WorkspaceSettings {
-    /// Retrieves the settings of the formatter
-    pub fn formatter(&self) -> &FormatSettings {
-        &self.formatter
-    }
-
-    /// Whether the formatter is disabled for JavaScript files
-    pub fn javascript_formatter_disabled(&self) -> bool {
-        let enabled = self.languages.javascript.formatter.enabled.as_ref();
-        enabled == Some(&false)
-    }
-
-    /// Whether the formatter is disabled for JSON files
-    pub fn json_formatter_disabled(&self) -> bool {
-        let enabled = self.languages.json.formatter.enabled.as_ref();
-        enabled == Some(&false)
-    }
-
-    /// Whether the formatter is disabled for CSS files
-    pub fn css_formatter_disabled(&self) -> bool {
-        let enabled = self.languages.css.formatter.enabled.as_ref();
-        enabled == Some(&false)
-    }
-
-    /// Retrieves the settings of the linter
-    pub fn linter(&self) -> &LinterSettings {
-        &self.linter
-    }
-
-    /// Retrieves the settings of the organize imports
-    pub fn organize_imports(&self) -> &OrganizeImportsSettings {
-        &self.organize_imports
-    }
-
+impl Settings {
     /// The [PartialConfiguration] is merged into the workspace
     #[tracing::instrument(level = "trace", skip(self))]
     pub fn merge_with_configuration(
@@ -146,6 +225,57 @@ impl WorkspaceSettings {
         }
 
         Ok(())
+    }
+
+    /// Retrieves the settings of the formatter
+    pub fn formatter(&self) -> &FormatSettings {
+        &self.formatter
+    }
+
+    /// Whether the formatter is disabled for JavaScript files
+    pub fn javascript_formatter_disabled(&self) -> bool {
+        let enabled = self.languages.javascript.formatter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Whether the formatter is disabled for JSON files
+    pub fn json_formatter_disabled(&self) -> bool {
+        let enabled = self.languages.json.formatter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Whether the formatter is disabled for CSS files
+    pub fn css_formatter_disabled(&self) -> bool {
+        let enabled = self.languages.css.formatter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Whether the linter is disabled for CSS files
+    pub fn javascript_linter_disabled(&self) -> bool {
+        let enabled = self.languages.javascript.linter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Whether the linter is disabled for CSS files
+    pub fn json_linter_disabled(&self) -> bool {
+        let enabled = self.languages.json.linter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Whether the linter is disabled for CSS files
+    pub fn css_linter_disabled(&self) -> bool {
+        let enabled = self.languages.css.linter.enabled.as_ref();
+        enabled == Some(&false)
+    }
+
+    /// Retrieves the settings of the linter
+    pub fn linter(&self) -> &LinterSettings {
+        &self.linter
+    }
+
+    /// Retrieves the settings of the organize imports
+    pub fn organize_imports(&self) -> &OrganizeImportsSettings {
+        &self.organize_imports
     }
 
     /// It retrieves the severity based on the `code` of the rule and the current configuration.
@@ -320,7 +450,7 @@ impl From<JavascriptConfiguration> for LanguageSettings<JsLanguage> {
         language_setting.formatter.quote_style = Some(formatter.quote_style);
         language_setting.formatter.jsx_quote_style = Some(formatter.jsx_quote_style);
         language_setting.formatter.quote_properties = Some(formatter.quote_properties);
-        language_setting.formatter.trailing_comma = Some(formatter.trailing_comma);
+        language_setting.formatter.trailing_commas = Some(formatter.trailing_commas);
         language_setting.formatter.semicolons = Some(formatter.semicolons);
         language_setting.formatter.arrow_parentheses = Some(formatter.arrow_parentheses);
         language_setting.formatter.bracket_spacing = Some(formatter.bracket_spacing.into());
@@ -334,6 +464,7 @@ impl From<JavascriptConfiguration> for LanguageSettings<JsLanguage> {
 
         language_setting.globals = Some(javascript.globals.into_index_set());
         language_setting.environment = javascript.jsx_runtime.into();
+        language_setting.linter.enabled = Some(javascript.linter.enabled);
 
         language_setting
     }
@@ -350,6 +481,7 @@ impl From<JsonConfiguration> for LanguageSettings<JsonLanguage> {
         language_setting.formatter.line_width = json.formatter.line_width;
         language_setting.formatter.indent_width = json.formatter.indent_width.map(Into::into);
         language_setting.formatter.indent_style = json.formatter.indent_style.map(Into::into);
+        language_setting.linter.enabled = Some(json.linter.enabled);
 
         language_setting
     }
@@ -359,11 +491,15 @@ impl From<CssConfiguration> for LanguageSettings<CssLanguage> {
     fn from(css: CssConfiguration) -> Self {
         let mut language_setting: LanguageSettings<CssLanguage> = LanguageSettings::default();
 
+        language_setting.parser.allow_wrong_line_comments = css.parser.allow_wrong_line_comments;
+        language_setting.parser.css_modules = css.parser.css_modules;
+
         language_setting.formatter.enabled = Some(css.formatter.enabled);
-        language_setting.formatter.line_width = css.formatter.line_width;
-        language_setting.formatter.indent_width = css.formatter.indent_width.map(Into::into);
-        language_setting.formatter.indent_style = css.formatter.indent_style.map(Into::into);
+        language_setting.formatter.line_width = Some(css.formatter.line_width);
+        language_setting.formatter.indent_width = Some(css.formatter.indent_width);
+        language_setting.formatter.indent_style = Some(css.formatter.indent_style.into());
         language_setting.formatter.quote_style = Some(css.formatter.quote_style);
+        language_setting.linter.enabled = Some(css.linter.enabled);
 
         language_setting
     }
@@ -393,12 +529,23 @@ pub trait ServiceLanguage: biome_rowan::Language {
     /// Resolve the formatter options from the global (workspace level),
     /// per-language and editor provided formatter settings
     fn resolve_format_options(
-        global: &FormatSettings,
-        overrides: &OverrideSettings,
-        language: &Self::FormatterSettings,
+        global: Option<&FormatSettings>,
+        overrides: Option<&OverrideSettings>,
+        language: Option<&Self::FormatterSettings>,
         path: &BiomePath,
         file_source: &DocumentFileSource,
     ) -> Self::FormatOptions;
+
+    /// Resolve the linter options from the global (workspace level),
+    /// per-language and editor provided formatter settings
+    fn resolve_analyzer_options(
+        global: Option<&Settings>,
+        linter: Option<&LinterSettings>,
+        overrides: Option<&OverrideSettings>,
+        language: Option<&Self::LinterSettings>,
+        path: &BiomePath,
+        file_source: &DocumentFileSource,
+    ) -> AnalyzerOptions;
 }
 
 #[derive(Debug, Default)]
@@ -492,41 +639,87 @@ fn to_file_settings(
 /// Handle object holding a temporary lock on the workspace settings until
 /// the deferred language-specific options resolution is called
 #[derive(Debug)]
-pub struct SettingsHandle<'a> {
+pub struct WorkspaceSettingsHandle<'a> {
     inner: RwLockReadGuard<'a, WorkspaceSettings>,
 }
 
-impl<'a> SettingsHandle<'a> {
+impl<'a> WorkspaceSettingsHandle<'a> {
     pub(crate) fn new(settings: &'a RwLock<WorkspaceSettings>) -> Self {
         Self {
             inner: settings.read().unwrap(),
         }
     }
+
+    pub(crate) fn settings(&self) -> Option<&Settings> {
+        self.inner.get_current_settings()
+    }
 }
 
-impl<'a> AsRef<WorkspaceSettings> for SettingsHandle<'a> {
+impl<'a> AsRef<WorkspaceSettings> for WorkspaceSettingsHandle<'a> {
     fn as_ref(&self) -> &WorkspaceSettings {
         &self.inner
     }
 }
 
-impl<'a> SettingsHandle<'a> {
+impl<'a> WorkspaceSettingsHandle<'a> {
     /// Resolve the formatting context for the given language
     pub(crate) fn format_options<L>(
-        self,
+        &self,
         path: &BiomePath,
         file_source: &DocumentFileSource,
     ) -> L::FormatOptions
     where
         L: ServiceLanguage,
     {
-        L::resolve_format_options(
-            &self.inner.formatter,
-            &self.inner.override_settings,
-            &L::lookup_settings(&self.inner.languages).formatter,
+        let settings = self.inner.get_current_settings();
+        let formatter = settings.map(|s| &s.formatter);
+        let overrides = settings.map(|s| &s.override_settings);
+        let editor_settings = settings
+            .map(|s| L::lookup_settings(&s.languages))
+            .map(|result| &result.formatter);
+        L::resolve_format_options(formatter, overrides, editor_settings, path, file_source)
+    }
+
+    pub(crate) fn analyzer_options<L>(
+        &self,
+        path: &BiomePath,
+        file_source: &DocumentFileSource,
+    ) -> AnalyzerOptions
+    where
+        L: ServiceLanguage,
+    {
+        let settings = self.inner.get_current_settings();
+        let linter = settings.map(|s| &s.linter);
+        let overrides = settings.map(|s| &s.override_settings);
+        let editor_settings = settings
+            .map(|s| L::lookup_settings(&s.languages))
+            .map(|result| &result.linter);
+        L::resolve_analyzer_options(
+            settings,
+            linter,
+            overrides,
+            editor_settings,
             path,
             file_source,
         )
+    }
+}
+
+pub struct WorkspaceSettingsHandleMut<'a> {
+    inner: RwLockWriteGuard<'a, WorkspaceSettings>,
+}
+
+impl<'a> WorkspaceSettingsHandleMut<'a> {
+    pub(crate) fn new(settings: &'a RwLock<WorkspaceSettings>) -> Self {
+        Self {
+            inner: settings.write().unwrap(),
+        }
+    }
+}
+
+impl<'a> AsMut<WorkspaceSettings> for WorkspaceSettingsHandleMut<'a> {
+    fn as_mut(&mut self) -> &mut WorkspaceSettings {
+        &mut self.inner
     }
 }
 
@@ -613,8 +806,8 @@ impl OverrideSettings {
             })
     }
 
-    /// It scans the current override rules and return the formatting options that of the first override is matched
-    pub fn override_json_format_options(
+    /// It scans the current override rules and return the json format that of the first override is matched
+    pub fn to_override_json_format_options(
         &self,
         path: &Path,
         options: JsonFormatOptions,
@@ -634,7 +827,7 @@ impl OverrideSettings {
     }
 
     /// It scans the current override rules and return the formatting options that of the first override is matched
-    pub fn override_css_format_options(
+    pub fn to_override_css_format_options(
         &self,
         path: &Path,
         options: CssFormatOptions,
@@ -653,7 +846,7 @@ impl OverrideSettings {
         })
     }
 
-    pub fn override_js_parser_options(
+    pub fn to_override_js_parser_options(
         &self,
         path: &Path,
         options: JsParserOptions,
@@ -671,7 +864,7 @@ impl OverrideSettings {
         })
     }
 
-    pub fn override_json_parser_options(
+    pub fn to_override_json_parser_options(
         &self,
         path: &Path,
         options: JsonParserOptions,
@@ -689,21 +882,22 @@ impl OverrideSettings {
         })
     }
 
-    pub fn as_css_parser_options(&self, path: &Path) -> Option<CssParserOptions> {
-        for pattern in &self.patterns {
+    /// It scans the current override rules and return the parser options that of the first override is matched
+    pub fn to_override_css_parser_options(
+        &self,
+        path: &Path,
+        options: CssParserOptions,
+    ) -> CssParserOptions {
+        self.patterns.iter().fold(options, |mut options, pattern| {
             let included = !pattern.include.is_empty() && pattern.include.matches_path(path);
             let excluded = !pattern.exclude.is_empty() && pattern.exclude.matches_path(path);
 
             if included || !excluded {
-                let css_parser = &pattern.languages.css.parser;
-
-                return Some(CssParserOptions {
-                    allow_wrong_line_comments: css_parser.allow_wrong_line_comments,
-                });
+                pattern.apply_overrides_to_css_parser_options(&mut options)
             }
-        }
 
-        None
+            options
+        })
     }
 
     /// Retrieves the options of lint rules that have been overridden
@@ -797,6 +991,7 @@ pub struct OverrideSettingPattern {
     pub(crate) cached_css_format_options: RwLock<Option<CssFormatOptions>>,
     pub(crate) cached_js_parser_options: RwLock<Option<JsParserOptions>>,
     pub(crate) cached_json_parser_options: RwLock<Option<JsonParserOptions>>,
+    pub(crate) cached_css_parser_options: RwLock<Option<CssParserOptions>>,
 }
 impl OverrideSettingPattern {
     fn apply_overrides_to_js_format_options(&self, options: &mut JsFormatOptions) {
@@ -830,8 +1025,8 @@ impl OverrideSettingPattern {
         if let Some(quote_properties) = js_formatter.quote_properties {
             options.set_quote_properties(quote_properties);
         }
-        if let Some(trailing_comma) = js_formatter.trailing_comma {
-            options.set_trailing_comma(trailing_comma);
+        if let Some(trailing_commas) = js_formatter.trailing_commas {
+            options.set_trailing_commas(trailing_commas);
         }
         if let Some(semicolons) = js_formatter.semicolons {
             options.set_semicolons(semicolons);
@@ -958,6 +1153,25 @@ impl OverrideSettingPattern {
         }
     }
 
+    fn apply_overrides_to_css_parser_options(&self, options: &mut CssParserOptions) {
+        if let Ok(readonly_cache) = self.cached_css_parser_options.read() {
+            if let Some(cached_options) = readonly_cache.as_ref() {
+                *options = *cached_options;
+                return;
+            }
+        }
+
+        let css_parser = &self.languages.css.parser;
+
+        options.allow_wrong_line_comments = css_parser.allow_wrong_line_comments;
+        options.css_modules = css_parser.css_modules;
+
+        if let Ok(mut writeonly_cache) = self.cached_css_parser_options.write() {
+            let options = *options;
+            let _ = writeonly_cache.insert(options);
+        }
+    }
+
     #[allow(dead_code)]
     // NOTE: Currently not used because the rule options are typed using TypeId and Any, which isn't thread safe.
     // TODO: Find a way to cache this
@@ -980,10 +1194,10 @@ pub fn to_matcher(
     if let Some(string_set) = string_set {
         for pattern in string_set.iter() {
             matcher.add_pattern(pattern).map_err(|err| {
-                WorkspaceError::Configuration(ConfigurationDiagnostic::new_invalid_ignore_pattern(
+                BiomeDiagnostic::new_invalid_ignore_pattern(
                     pattern.to_string(),
                     err.msg.to_string(),
-                ))
+                )
             })?;
         }
     }
@@ -997,19 +1211,15 @@ fn to_git_ignore(path: PathBuf, matches: &[String]) -> Result<Gitignore, Workspa
         gitignore_builder
             .add_line(Some(path.clone()), the_match)
             .map_err(|err| {
-                WorkspaceError::Configuration(ConfigurationDiagnostic::InvalidIgnorePattern(
-                    InvalidIgnorePattern {
-                        message: err.to_string(),
-                    },
-                ))
+                BiomeDiagnostic::InvalidIgnorePattern(InvalidIgnorePattern {
+                    message: err.to_string(),
+                })
             })?;
     }
     let gitignore = gitignore_builder.build().map_err(|err| {
-        WorkspaceError::Configuration(ConfigurationDiagnostic::InvalidIgnorePattern(
-            InvalidIgnorePattern {
-                message: err.to_string(),
-            },
-        ))
+        BiomeDiagnostic::InvalidIgnorePattern(InvalidIgnorePattern {
+            message: err.to_string(),
+        })
     })?;
     Ok(gitignore)
 }
@@ -1042,7 +1252,7 @@ impl TryFrom<OverrideOrganizeImportsConfiguration> for OrganizeImportsSettings {
 pub fn to_override_settings(
     working_directory: Option<PathBuf>,
     overrides: Overrides,
-    current_settings: &WorkspaceSettings,
+    current_settings: &Settings,
 ) -> Result<OverrideSettings, WorkspaceError> {
     let mut override_settings = OverrideSettings::default();
     for mut pattern in overrides.0 {
@@ -1105,7 +1315,13 @@ pub(crate) fn to_override_format_settings(
         .unwrap_or(format_settings.format_with_errors);
 
     OverrideFormatSettings {
-        enabled: conf.enabled.or(Some(format_settings.enabled)),
+        enabled: conf.enabled.or(
+            if format_settings.enabled != FormatSettings::default().enabled {
+                Some(format_settings.enabled)
+            } else {
+                None
+            },
+        ),
         indent_style,
         indent_width,
         line_ending,
@@ -1138,8 +1354,10 @@ fn to_javascript_language_settings(
     language_setting.formatter.quote_properties = formatter
         .quote_properties
         .or(parent_formatter.quote_properties);
-    language_setting.formatter.trailing_comma =
-        formatter.trailing_comma.or(parent_formatter.trailing_comma);
+    language_setting.formatter.trailing_commas = formatter
+        .trailing_commas
+        .or(formatter.trailing_comma)
+        .or(parent_formatter.trailing_commas);
     language_setting.formatter.semicolons = formatter.semicolons.or(parent_formatter.semicolons);
     language_setting.formatter.arrow_parentheses = formatter
         .arrow_parentheses
@@ -1237,7 +1455,6 @@ fn to_css_language_settings(
     language_setting.formatter.indent_width = formatter
         .indent_width
         .map(Into::into)
-        .or(formatter.indent_size.map(Into::into))
         .or(parent_formatter.indent_width);
     language_setting.formatter.indent_style = formatter
         .indent_style
@@ -1250,6 +1467,7 @@ fn to_css_language_settings(
     language_setting.parser.allow_wrong_line_comments = parser
         .allow_wrong_line_comments
         .unwrap_or(parent_parser.allow_wrong_line_comments);
+    language_setting.parser.css_modules = parser.css_modules.unwrap_or(parent_parser.css_modules);
 
     language_setting
 }
@@ -1271,7 +1489,7 @@ pub fn to_format_settings(
         PlainIndentStyle::Tab => IndentStyle::Tab,
         PlainIndentStyle::Space => IndentStyle::Space,
     };
-    let indent_width = conf.indent_width.into();
+    let indent_width = conf.indent_width;
 
     Ok(FormatSettings {
         enabled: conf.enabled,

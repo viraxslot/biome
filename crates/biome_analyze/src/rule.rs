@@ -1,9 +1,7 @@
 use crate::categories::{ActionCategory, RuleCategory};
 use crate::context::RuleContext;
 use crate::registry::{RegistryVisitor, RuleLanguage, RuleSuppressions};
-use crate::{
-    Phase, Phases, Queryable, SuppressionCommentEmitter, SuppressionCommentEmitterPayload,
-};
+use crate::{Phase, Phases, Queryable, SuppressionAction, SuppressionCommentEmitterPayload};
 use biome_console::fmt::Display;
 use biome_console::{markup, MarkupBuf};
 use biome_diagnostics::advice::CodeSuggestionAdvice;
@@ -17,7 +15,9 @@ use biome_rowan::{AstNode, BatchMutation, BatchMutationExt, Language, TextRange}
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 /// Static metadata containing information about a rule
 pub struct RuleMetadata {
     /// It marks if a rule is deprecated, and if so a reason has to be provided.
@@ -28,19 +28,34 @@ pub struct RuleMetadata {
     pub name: &'static str,
     /// The content of the documentation comments for this rule
     pub docs: &'static str,
+    /// The language that the rule applies to.
+    pub language: &'static str,
     /// Whether a rule is recommended or not
     pub recommended: bool,
     /// The kind of fix
-    pub fix_kind: Option<FixKind>,
+    pub fix_kind: FixKind,
     /// The source URL of the rule
     pub sources: &'static [RuleSource],
     /// The source kind of the rule
     pub source_kind: Option<RuleSourceKind>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(
+        biome_deserialize_macros::Deserializable,
+        schemars::JsonSchema,
+        serde::Deserialize,
+        serde::Serialize
+    )
+)]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 /// Used to identify the kind of code action emitted by a rule
 pub enum FixKind {
+    /// The rule doesn't emit code actions.
+    #[default]
+    None,
     /// The rule emits a code action that is safe to apply. Usually these fixes don't change the semantic of the program.
     Safe,
     /// The rule emits a code action that is _unsafe_ to apply. Usually these fixes remove comments, or change
@@ -51,13 +66,27 @@ pub enum FixKind {
 impl Display for FixKind {
     fn fmt(&self, fmt: &mut biome_console::fmt::Formatter) -> std::io::Result<()> {
         match self {
+            FixKind::None => fmt.write_str("None"),
             FixKind::Safe => fmt.write_str("Safe"),
             FixKind::Unsafe => fmt.write_str("Unsafe"),
         }
     }
 }
 
+impl TryFrom<FixKind> for Applicability {
+    type Error = &'static str;
+    fn try_from(value: FixKind) -> Result<Self, Self::Error> {
+        match value {
+            FixKind::None => Err("The fix kind is None"),
+            FixKind::Safe => Ok(Applicability::Always),
+            FixKind::Unsafe => Ok(Applicability::MaybeIncorrect),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum RuleSource {
     /// Rules from [Rust Clippy](https://rust-lang.github.io/rust-clippy/master/index.html)
     Clippy(&'static str),
@@ -85,6 +114,8 @@ pub enum RuleSource {
     EslintTypeScript(&'static str),
     /// Rules from [Eslint Plugin Unicorn](https://github.com/sindresorhus/eslint-plugin-unicorn)
     EslintUnicorn(&'static str),
+    /// Rules from  [Eslint Plugin Unused Imports](https://github.com/sweepline/eslint-plugin-unused-imports)
+    EslintUnusedImports(&'static str),
     /// Rules from [Eslint Plugin Mysticatea](https://github.com/mysticatea/eslint-plugin)
     EslintMysticatea(&'static str),
     /// Rules from [Eslint Plugin Barrel Files](https://github.com/thepassle/eslint-plugin-barrel-files)
@@ -102,22 +133,23 @@ impl PartialEq for RuleSource {
 impl std::fmt::Display for RuleSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuleSource::Clippy(_) => write!(f, "Clippy"),
-            RuleSource::Eslint(_) => write!(f, "ESLint"),
-            RuleSource::EslintImport(_) => write!(f, "eslint-plugin-import"),
-            RuleSource::EslintImportAccess(_) => write!(f, "eslint-plugin-import-access"),
-            RuleSource::EslintJest(_) => write!(f, "eslint-plugin-jest"),
-            RuleSource::EslintJsxA11y(_) => write!(f, "eslint-plugin-jsx-a11y"),
-            RuleSource::EslintReact(_) => write!(f, "eslint-plugin-react"),
-            RuleSource::EslintReactHooks(_) => write!(f, "eslint-plugin-react-hooks"),
-            RuleSource::EslintSolid(_) => write!(f, "eslint-plugin-solid"),
-            RuleSource::EslintSonarJs(_) => write!(f, "eslint-plugin-sonarjs"),
-            RuleSource::EslintStylistic(_) => write!(f, "eslint-plugin-stylistic"),
-            RuleSource::EslintTypeScript(_) => write!(f, "typescript-eslint"),
-            RuleSource::EslintUnicorn(_) => write!(f, "eslint-plugin-unicorn"),
-            RuleSource::EslintMysticatea(_) => write!(f, "@mysticatea/eslint-plugin"),
-            RuleSource::EslintBarrelFiles(_) => write!(f, "eslint-plugin-barrel-files"),
-            RuleSource::Stylelint(_) => write!(f, "Stylelint"),
+            Self::Clippy(_) => write!(f, "Clippy"),
+            Self::Eslint(_) => write!(f, "ESLint"),
+            Self::EslintImport(_) => write!(f, "eslint-plugin-import"),
+            Self::EslintImportAccess(_) => write!(f, "eslint-plugin-import-access"),
+            Self::EslintJest(_) => write!(f, "eslint-plugin-jest"),
+            Self::EslintJsxA11y(_) => write!(f, "eslint-plugin-jsx-a11y"),
+            Self::EslintReact(_) => write!(f, "eslint-plugin-react"),
+            Self::EslintReactHooks(_) => write!(f, "eslint-plugin-react-hooks"),
+            Self::EslintSolid(_) => write!(f, "eslint-plugin-solid"),
+            Self::EslintSonarJs(_) => write!(f, "eslint-plugin-sonarjs"),
+            Self::EslintStylistic(_) => write!(f, "eslint-plugin-stylistic"),
+            Self::EslintTypeScript(_) => write!(f, "typescript-eslint"),
+            Self::EslintUnicorn(_) => write!(f, "eslint-plugin-unicorn"),
+            Self::EslintUnusedImports(_) => write!(f, "eslint-plugin-unused-imports"),
+            Self::EslintMysticatea(_) => write!(f, "@mysticatea/eslint-plugin"),
+            Self::EslintBarrelFiles(_) => write!(f, "eslint-plugin-barrel-files"),
+            Self::Stylelint(_) => write!(f, "Stylelint"),
         }
     }
 }
@@ -160,6 +192,7 @@ impl RuleSource {
             | Self::EslintSonarJs(rule_name)
             | Self::EslintStylistic(rule_name)
             | Self::EslintUnicorn(rule_name)
+            | Self::EslintUnusedImports(rule_name)
             | Self::EslintMysticatea(rule_name)
             | Self::EslintBarrelFiles(rule_name)
             | Self::Stylelint(rule_name) => rule_name,
@@ -180,6 +213,7 @@ impl RuleSource {
             Self::EslintSonarJs(rule_name) => format!("sonarjs/{rule_name}"),
             Self::EslintStylistic(rule_name) => format!("@stylistic/{rule_name}"),
             Self::EslintUnicorn(rule_name) => format!("unicorn/{rule_name}"),
+            Self::EslintUnusedImports(rule_name) => format!("unused-imports/{rule_name}"),
             Self::EslintMysticatea(rule_name) => format!("@mysticatea/{rule_name}"),
             Self::EslintBarrelFiles(rule_name) => format!("barrel-files/{rule_name}"),
             Self::Stylelint(rule_name) => format!("stylelint/{rule_name}"),
@@ -201,6 +235,7 @@ impl RuleSource {
             Self::EslintSonarJs(rule_name) => format!("https://github.com/SonarSource/eslint-plugin-sonarjs/blob/HEAD/docs/rules/{rule_name}.md"),
             Self::EslintStylistic(rule_name) => format!("https://eslint.style/rules/default/{rule_name}"),
             Self::EslintUnicorn(rule_name) => format!("https://github.com/sindresorhus/eslint-plugin-unicorn/blob/main/docs/rules/{rule_name}.md"),
+            Self::EslintUnusedImports(rule_name) => format!("https://github.com/sweepline/eslint-plugin-unused-imports/blob/master/docs/rules/{rule_name}.md"),
             Self::EslintMysticatea(rule_name) => format!("https://github.com/mysticatea/eslint-plugin/blob/master/docs/rules/{rule_name}.md"),
             Self::EslintBarrelFiles(rule_name) => format!("https://github.com/thepassle/eslint-plugin-barrel-files/blob/main/docs/rules/{rule_name}.md"),
             Self::Stylelint(rule_name) => format!("https://github.com/stylelint/stylelint/blob/main/lib/rules/{rule_name}/README.md"),
@@ -218,7 +253,7 @@ impl RuleSource {
 
     /// All ESLint plugins, exception for the TypeScript one
     pub const fn is_eslint_plugin(&self) -> bool {
-        !matches!(self, Self::Clippy(_) | Self::Eslint(_))
+        !matches!(self, Self::Clippy(_) | Self::Eslint(_) | Self::Stylelint(_))
     }
 
     pub const fn is_stylelint(&self) -> bool {
@@ -227,6 +262,8 @@ impl RuleSource {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum RuleSourceKind {
     /// The rule implements the same logic of the source
     #[default]
@@ -242,14 +279,20 @@ impl RuleSourceKind {
 }
 
 impl RuleMetadata {
-    pub const fn new(version: &'static str, name: &'static str, docs: &'static str) -> Self {
+    pub const fn new(
+        version: &'static str,
+        name: &'static str,
+        docs: &'static str,
+        language: &'static str,
+    ) -> Self {
         Self {
             deprecated: None,
             version,
             name,
             docs,
+            language,
             recommended: false,
-            fix_kind: None,
+            fix_kind: FixKind::None,
             sources: &[],
             source_kind: None,
         }
@@ -266,7 +309,7 @@ impl RuleMetadata {
     }
 
     pub const fn fix_kind(mut self, kind: FixKind) -> Self {
-        self.fix_kind = Some(kind);
+        self.fix_kind = kind;
         self
     }
 
@@ -281,6 +324,17 @@ impl RuleMetadata {
     pub const fn source_kind(mut self, source_kind: RuleSourceKind) -> Self {
         self.source_kind = Some(source_kind);
         self
+    }
+
+    pub const fn language(mut self, language: &'static str) -> Self {
+        self.language = language;
+        self
+    }
+
+    pub fn applicability(&self) -> Applicability {
+        self.fix_kind
+            .try_into()
+            .expect("Fix kind is not set in the rule metadata")
     }
 }
 
@@ -315,6 +369,7 @@ macro_rules! declare_rule {
     ( $( #[doc = $doc:literal] )+ $vis:vis $id:ident {
         version: $version:literal,
         name: $name:tt,
+        language: $language:literal,
         $( $key:ident: $value:expr, )*
     } ) => {
         $( #[doc = $doc] )*
@@ -323,7 +378,7 @@ macro_rules! declare_rule {
         impl $crate::RuleMeta for $id {
             type Group = super::Group;
             const METADATA: $crate::RuleMetadata =
-                $crate::RuleMetadata::new($version, $name, concat!( $( $doc, "\n", )* )) $( .$key($value) )*;
+                $crate::RuleMetadata::new($version, $name, concat!( $( $doc, "\n", )* ), $language) $( .$key($value) )*;
         }
 
         // Declare a new `rule_category!` macro in the module context that
@@ -494,6 +549,36 @@ pub trait Rule: RuleMeta + Sized {
     /// `diagnostic` or `action` on it
     fn run(ctx: &RuleContext<Self>) -> Self::Signals;
 
+    /// Returns the instances associated with the given signal.
+    ///
+    /// This allows suppression of specific instances of a given rule, without
+    /// suppressing other instances of the same rule.
+    ///
+    /// ## Example
+    ///
+    /// Consider the situation where the following two variables are unused:
+    ///
+    /// ```js
+    /// let a, b;
+    /// ```
+    ///
+    /// The rule `noUnusedVariables` will report a diagnostic about it, which we
+    /// can suppress with `// biome-ignore lint/correctness/noUnusedVariables`.
+    ///
+    /// But what if we wanted to suppress the rule for `a`, but not for `b`?
+    ///
+    /// We would need to recognize there are actually two separate instances
+    /// that the rule is reporting on, identified as "a" and "b". This allows
+    /// the user to suppress a specific instance using
+    /// `// biome-ignore lint/correctness/noUnusedVariables(a)`.
+    ///
+    /// *Note: For `noUnusedVariables` the above may not seem very useful (and
+    /// indeed it's not implemented), but for rules such as
+    /// `useExhaustiveDependencies` this is actually desirable.*
+    fn instances_for_signal(_signal: &Self::State) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Used by the analyzer to associate a range of source text to a signal in
     /// order to support suppression comments.
     ///
@@ -570,7 +655,7 @@ pub trait Rule: RuleMeta + Sized {
     fn suppress(
         ctx: &RuleContext<Self>,
         text_range: &TextRange,
-        apply_suppression_comment: SuppressionCommentEmitter<RuleLanguage<Self>>,
+        suppression_action: &dyn SuppressionAction<Language = RuleLanguage<Self>>,
     ) -> Option<SuppressAction<RuleLanguage<Self>>>
     where
         Self: 'static,
@@ -586,7 +671,7 @@ pub trait Rule: RuleMeta + Sized {
             let root = ctx.root();
             let token = root.syntax().token_at_offset(text_range.start());
             let mut mutation = root.begin();
-            apply_suppression_comment(SuppressionCommentEmitterPayload {
+            suppression_action.apply_suppression_comment(SuppressionCommentEmitterPayload {
                 suppression_text: suppression_text.as_str(),
                 mutation: &mut mutation,
                 token_offset: token,
@@ -786,9 +871,29 @@ impl RuleDiagnostic {
 /// Code Action object returned by a single analysis rule
 pub struct RuleAction<L: Language> {
     pub category: ActionCategory,
-    pub applicability: Applicability,
+    applicability: Applicability,
     pub message: MarkupBuf,
     pub mutation: BatchMutation<L>,
+}
+
+impl<L: Language> RuleAction<L> {
+    pub fn new(
+        category: ActionCategory,
+        applicability: impl Into<Applicability>,
+        message: impl biome_console::fmt::Display,
+        mutation: BatchMutation<L>,
+    ) -> Self {
+        Self {
+            category,
+            applicability: applicability.into(),
+            message: markup! {{message}}.to_owned(),
+            mutation,
+        }
+    }
+
+    pub fn applicability(&self) -> Applicability {
+        self.applicability
+    }
 }
 
 /// An action meant to suppress a lint rule

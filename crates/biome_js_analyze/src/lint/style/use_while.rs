@@ -1,8 +1,8 @@
 use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic,
+    RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{AnyJsStatement, JsForStatement, T};
 use biome_rowan::{trim_leading_trivia_pieces, AstNode, BatchMutationExt};
@@ -41,7 +41,9 @@ declare_rule! {
     pub UseWhile {
         version: "1.0.0",
         name: "useWhile",
+        language: "js",
         recommended: true,
+        sources: &[RuleSource::EslintSonarJs("prefer-while")],
         fix_kind: FixKind::Safe,
     }
 }
@@ -95,11 +97,11 @@ impl Rule for UseWhile {
             )),
         );
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! { "Use a "<Emphasis>"while"</Emphasis>" loop." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Use a "<Emphasis>"while"</Emphasis>" loop." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

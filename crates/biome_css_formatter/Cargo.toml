@@ -10,9 +10,6 @@ name                 = "biome_css_formatter"
 repository.workspace = true
 version              = "0.5.7"
 
-[features]
-format_css = []
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -23,6 +20,7 @@ biome_rowan       = { workspace = true }
 biome_suppression = { workspace = true }
 
 [dev-dependencies]
+biome_configuration  = { path = "../biome_configuration" }
 biome_css_parser     = { path = "../biome_css_parser" }
 biome_formatter_test = { path = "../biome_formatter_test" }
 biome_parser         = { path = "../biome_parser" }

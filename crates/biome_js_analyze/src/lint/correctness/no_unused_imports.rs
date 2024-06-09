@@ -5,10 +5,9 @@ use crate::{
 };
 use biome_analyze::{
     context::RuleContext, declare_rule, options::JsxRuntime, ActionCategory, FixKind, Rule,
-    RuleDiagnostic,
+    RuleDiagnostic, RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_semantic::ReferencesExtensions;
 use biome_js_syntax::{
@@ -79,6 +78,8 @@ declare_rule! {
     pub NoUnusedImports {
         version: "1.3.0",
         name: "noUnusedImports",
+        language: "js",
+        sources: &[RuleSource::EslintUnusedImports("no-unused-imports")],
         recommended: false,
         fix_kind: FixKind::Safe,
     }
@@ -158,12 +159,12 @@ impl Rule for NoUnusedImports {
                 return None;
             }
         }
-        Some(JsRuleAction {
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the unused import." }.to_owned(),
             mutation,
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! { "Remove the unused import." }.to_owned(),
-        })
+        ))
     }
 }
 

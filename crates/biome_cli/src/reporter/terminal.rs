@@ -3,7 +3,7 @@ use crate::reporter::{DiagnosticsPayload, ReporterVisitor, TraversalSummary};
 use crate::Reporter;
 use biome_console::fmt::Formatter;
 use biome_console::{fmt, markup, Console, ConsoleExt};
-use biome_diagnostics::{PrintDiagnostic, PrintGitHubDiagnostic};
+use biome_diagnostics::PrintDiagnostic;
 use std::io;
 use std::time::Duration;
 
@@ -31,7 +31,7 @@ impl<'a> ReporterVisitor for ConsoleReporterVisitor<'a> {
         if execution.is_check() && summary.suggested_fixes_skipped > 0 {
             self.0.log(markup! {
                 <Warn>"Skipped "{summary.suggested_fixes_skipped}" suggested fixes.\n"</Warn>
-                <Info>"If you wish to apply the suggested (unsafe) fixes, use the command "<Emphasis>"biome check --apply-unsafe\n"</Emphasis></Info>
+                <Info>"If you wish to apply the suggested (unsafe) fixes, use the command "<Emphasis>"biome check --fix --unsafe\n"</Emphasis></Info>
             })
         }
 
@@ -51,7 +51,7 @@ impl<'a> ReporterVisitor for ConsoleReporterVisitor<'a> {
 
     fn report_diagnostics(
         &mut self,
-        execution: &Execution,
+        _execution: &Execution,
         diagnostics_payload: DiagnosticsPayload,
     ) -> io::Result<()> {
         for diagnostic in &diagnostics_payload.diagnostics {
@@ -63,10 +63,6 @@ impl<'a> ReporterVisitor for ConsoleReporterVisitor<'a> {
                     self.0
                         .error(markup! {{PrintDiagnostic::simple(diagnostic)}});
                 }
-            }
-            if execution.is_ci_github() {
-                self.0
-                    .log(markup! {{PrintGitHubDiagnostic::simple(diagnostic)}});
             }
         }
 
@@ -144,7 +140,10 @@ impl<'a> fmt::Display for SummaryTotal<'a> {
     }
 }
 
-struct ConsoleTraversalSummary<'a>(pub(crate) &'a TraversalMode, &'a TraversalSummary);
+pub(crate) struct ConsoleTraversalSummary<'a>(
+    pub(crate) &'a TraversalMode,
+    pub(crate) &'a TraversalSummary,
+);
 impl<'a> fmt::Display for ConsoleTraversalSummary<'a> {
     fn fmt(&self, fmt: &mut Formatter) -> io::Result<()> {
         let summary = SummaryTotal(self.0, self.1.changed + self.1.unchanged, &self.1.duration);

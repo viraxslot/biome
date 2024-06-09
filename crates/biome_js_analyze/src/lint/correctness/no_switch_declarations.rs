@@ -1,7 +1,6 @@
 use biome_analyze::context::RuleContext;
 use biome_analyze::{declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic, RuleSource};
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     AnyJsDeclaration, AnyJsStatement, AnyJsSwitchClause, JsVariableStatement, TriviaPieceKind, T,
@@ -72,6 +71,7 @@ declare_rule! {
     pub NoSwitchDeclarations {
         version: "1.0.0",
         name: "noSwitchDeclarations",
+        language: "js",
         sources: &[RuleSource::Eslint("no-case-declarations")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -134,12 +134,11 @@ impl Rule for NoSwitchDeclarations {
         let mut mutation = ctx.root().begin();
         mutation.replace_token_discard_trivia(colon_token, new_colon_token);
         mutation.replace_node_discard_trivia(consequent, new_consequent);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Wrap the "<Emphasis>"declaration"</Emphasis>" in a block." }
-                .to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Wrap the "<Emphasis>"declaration"</Emphasis>" in a block." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

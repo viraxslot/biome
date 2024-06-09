@@ -3,7 +3,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     AnyJsClass, AnyJsClassMember, AnyJsExpression, JsArrowFunctionExpression, JsSuperExpression,
@@ -81,6 +80,7 @@ declare_rule! {
     pub NoThisInStatic {
         version: "1.3.1",
         name: "noThisInStatic",
+        language: "js",
         sources: &[RuleSource::EslintMysticatea("no-this-in-static")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -170,12 +170,12 @@ impl Rule for NoThisInStatic {
         let expr = AnyJsExpression::cast_ref(this_super_expression.syntax())?;
         let mut mutation = ctx.root().begin();
         mutation.replace_node(expr, suggested_class_name.into());
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Use the class name instead." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Use the class name instead." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

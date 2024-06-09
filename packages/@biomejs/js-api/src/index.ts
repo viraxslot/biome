@@ -3,7 +3,6 @@ import type {
 	Diagnostic,
 	FixFileMode,
 	PartialConfiguration,
-	PullDiagnosticsResult,
 	Workspace,
 } from "@biomejs/wasm-nodejs";
 import { Distribution, type WasmModule, loadModule, wrapError } from "./wasm";
@@ -101,7 +100,9 @@ export class Biome {
 	public static async create(options: BiomeCreate): Promise<Biome> {
 		const module = await loadModule(options.distribution);
 		const workspace = new module.Workspace();
-		return new Biome(module, workspace);
+		const biome = new Biome(module, workspace);
+		biome.registerProjectFolder();
+		return biome;
 	}
 
 	/**
@@ -126,10 +127,19 @@ export class Biome {
 			this.workspace.updateSettings({
 				configuration,
 				gitignore_matches: [],
+				workspace_directory: "./",
 			});
 		} catch (e) {
 			throw wrapError(e);
 		}
+	}
+
+	public registerProjectFolder(): void;
+	public registerProjectFolder(path?: string): void {
+		this.workspace.registerProjectFolder({
+			path,
+			setAsCurrentWorkspace: true,
+		});
 	}
 
 	private tryCatchWrapper<T>(func: () => T): T {
@@ -189,6 +199,8 @@ export class Biome {
 				path,
 				categories: ["Syntax"],
 				max_diagnostics: Number.MAX_SAFE_INTEGER,
+				only: [],
+				skip: [],
 			});
 
 			const hasErrors = diagnostics.some(
@@ -259,6 +271,8 @@ export class Biome {
 				path,
 				categories: ["Syntax", "Lint"],
 				max_diagnostics: Number.MAX_SAFE_INTEGER,
+				only: [],
+				skip: [],
 			});
 
 			return {

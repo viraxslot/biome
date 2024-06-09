@@ -1,6 +1,7 @@
 use crate::changed::get_changed_files;
 use crate::cli_options::CliOptions;
-use crate::commands::validate_configuration_diagnostics;
+use crate::commands::{resolve_manifest, validate_configuration_diagnostics};
+use crate::execute::VcsTargeted;
 use crate::{execute_mode, setup_cli_subscriber, CliDiagnostic, CliSession, Execution};
 use biome_configuration::{organize_imports::PartialOrganizeImports, PartialConfiguration};
 use biome_configuration::{PartialFormatterConfiguration, PartialLinterConfiguration};
@@ -8,7 +9,7 @@ use biome_deserialize::Merge;
 use biome_service::configuration::{
     load_configuration, LoadedConfiguration, PartialConfigurationExt,
 };
-use biome_service::workspace::UpdateSettingsParams;
+use biome_service::workspace::{RegisterProjectFolderParams, UpdateSettingsParams};
 use std::ffi::OsString;
 
 pub(crate) struct CiCommandPayload {
@@ -44,6 +45,7 @@ pub(crate) fn ci(session: CliSession, payload: CiCommandPayload) -> Result<(), C
         session.app.console,
         cli_options.verbose,
     )?;
+    resolve_manifest(&session)?;
 
     let LoadedConfiguration {
         configuration: mut fs_configuration,
@@ -109,15 +111,27 @@ pub(crate) fn ci(session: CliSession, payload: CiCommandPayload) -> Result<(), C
     session
         .app
         .workspace
+        .register_project_folder(RegisterProjectFolderParams {
+            path: session.app.fs.working_directory(),
+            set_as_current_workspace: true,
+        })?;
+
+    session
+        .app
+        .workspace
         .update_settings(UpdateSettingsParams {
             configuration: fs_configuration,
-            working_directory: session.app.fs.working_directory(),
+            workspace_directory: session.app.fs.working_directory(),
             vcs_base_path,
             gitignore_matches,
         })?;
 
     execute_mode(
-        Execution::new_ci().set_report(&cli_options),
+        Execution::new_ci(VcsTargeted {
+            staged: false,
+            changed,
+        })
+        .set_report(&cli_options),
         session,
         &cli_options,
         paths,

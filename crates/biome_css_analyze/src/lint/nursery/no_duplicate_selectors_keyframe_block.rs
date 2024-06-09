@@ -35,8 +35,9 @@ declare_rule! {
     /// ```
     ///
     pub NoDuplicateSelectorsKeyframeBlock {
-        version: "next",
+        version: "1.8.0",
         name: "noDuplicateSelectorsKeyframeBlock",
+        language: "css",
         recommended: true,
         sources:&[RuleSource::Stylelint("keyframe-block-no-duplicate-selectors")],
     }
@@ -71,7 +72,7 @@ impl Rule for NoDuplicateSelectorsKeyframeBlock {
                 rule_category!(),
                 node.range(),
                 markup! {
-                    "Unexpected duplicate selector: "<Emphasis>{node.text()}</Emphasis>
+                   "The duplicate keyframe selector is overwritten by later one."
                 },
             )
             .note(markup! {

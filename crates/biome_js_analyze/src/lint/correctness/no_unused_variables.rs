@@ -5,7 +5,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_semantic::ReferencesExtensions;
 use biome_js_syntax::binding_ext::{
     AnyJsBindingDeclaration, AnyJsIdentifierBinding, JsAnyParameterParentFunction,
@@ -30,6 +29,10 @@ declare_rule! {
     /// This rule won't report unused imports.
     /// If you want to report unused imports,
     /// enable [noUnusedImports](https://biomejs.dev/linter/rules/no-unused-imports/).
+    ///
+    /// From `v1.9.0`, the rule won't check unused function parameters any more.
+    /// Users should switch to
+    /// [noUnusedFunctionParameters](https://biomejs.dev/linter/rules/no-unused-function-parameters/)
     ///
     /// ## Examples
     ///
@@ -66,7 +69,7 @@ declare_rule! {
     /// export function f<T>() {}
     /// ```
     ///
-    /// # Valid
+    /// ### Valid
     ///
     /// ```js
     /// function foo(b) {
@@ -90,16 +93,18 @@ declare_rule! {
     pub NoUnusedVariables {
         version: "1.0.0",
         name: "noUnusedVariables",
+        language: "js",
         sources: &[
             RuleSource::Eslint("no-unused-vars"),
             RuleSource::EslintTypeScript("no-unused-vars"),
+            RuleSource::EslintUnusedImports("no-unused-vars")
         ],
         recommended: false,
         fix_kind: FixKind::Unsafe,
     }
 }
 
-/// Suggestion if the bindnig is unused
+/// Suggestion if the binding is unused
 #[derive(Debug)]
 pub enum SuggestedFix {
     /// No suggestion will be given
@@ -194,7 +199,7 @@ fn suggested_fix_if_unused(binding: &AnyJsIdentifierBinding) -> Option<Suggested
         | AnyJsBindingDeclaration::JsObjectBindingPatternProperty(_)
         | AnyJsBindingDeclaration::JsObjectBindingPatternRest(_)
         | AnyJsBindingDeclaration::JsObjectBindingPatternShorthandProperty(_) => {
-            unreachable!("The declaration should be resolved to its parent declaration");
+            None
         }
         node @ AnyJsBindingDeclaration::JsVariableDeclarator(_) => {
             if is_in_ambient_context(node.syntax()) {
@@ -422,15 +427,15 @@ impl Rule for NoUnusedVariables {
                 let new_name = format!("_{}", name_trimmed);
 
                 let model = ctx.model();
-                mutation.rename_node_declaration(model, binding.clone(), &new_name);
+                mutation.rename_node_declaration(model, binding, &new_name);
 
-                Some(JsRuleAction {
+                Some(JsRuleAction::new(
+                    ActionCategory::QuickFix,
+                    ctx.metadata().applicability(),
+                    markup! { "If this is intentional, prepend "<Emphasis>{name_trimmed}</Emphasis>" with an underscore." }
+                    .to_owned(),
                     mutation,
-                    category: ActionCategory::QuickFix,
-                    applicability: Applicability::MaybeIncorrect,
-                    message: markup! { "If this is intentional, prepend "<Emphasis>{name_trimmed}</Emphasis>" with an underscore." }
-                        .to_owned(),
-                })
+                ))
             }
         }
     }

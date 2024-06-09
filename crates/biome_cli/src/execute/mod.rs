@@ -9,9 +9,13 @@ use crate::commands::MigrateSubCommand;
 use crate::diagnostics::ReportDiagnostic;
 use crate::execute::migrate::MigratePayload;
 use crate::execute::traverse::traverse;
+use crate::reporter::github::{GithubReporter, GithubReporterVisitor};
 use crate::reporter::json::{JsonReporter, JsonReporterVisitor};
+use crate::reporter::junit::{JunitReporter, JunitReporterVisitor};
+use crate::reporter::summary::{SummaryReporter, SummaryReporterVisitor};
 use crate::reporter::terminal::{ConsoleReporter, ConsoleReporterVisitor};
 use crate::{CliDiagnostic, CliSession, DiagnosticsPayload, Reporter};
+use biome_configuration::linter::RuleSelector;
 use biome_console::{markup, ConsoleExt};
 use biome_diagnostics::adapters::SerdeJsonError;
 use biome_diagnostics::{category, Category};
@@ -37,12 +41,13 @@ pub struct Execution {
 }
 
 impl Execution {
-    pub fn new_format() -> Self {
+    pub fn new_format(vcs_targeted: VcsTargeted) -> Self {
         Self {
             traversal_mode: TraversalMode::Format {
                 ignore_errors: false,
                 write: false,
                 stdin: None,
+                vcs_targeted,
             },
             report_mode: ReportMode::default(),
             max_diagnostics: 0,
@@ -101,6 +106,12 @@ impl From<(PathBuf, String)> for Stdin {
 }
 
 #[derive(Debug, Clone)]
+pub struct VcsTargeted {
+    pub staged: bool,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum TraversalMode {
     /// This mode is enabled when running the command `biome check`
     Check {
@@ -113,6 +124,8 @@ pub enum TraversalMode {
         /// 1. The virtual path to the file
         /// 2. The content of the file
         stdin: Option<Stdin>,
+        /// A flag to know vcs integrated options such as `--staged` or `--changed` are enabled
+        vcs_targeted: VcsTargeted,
     },
     /// This mode is enabled when running the command `biome lint`
     Lint {
@@ -125,11 +138,22 @@ pub enum TraversalMode {
         /// 1. The virtual path to the file
         /// 2. The content of the file
         stdin: Option<Stdin>,
+        /// Run only the given rule or group of rules.
+        /// If the severity level of a rule is `off`,
+        /// then the severity level of the rule is set to `error` if it is a recommended rule or `warn` otherwise.
+        only: Vec<RuleSelector>,
+        /// Skip the given rule or group of rules by setting the severity level of the rules to `off`.
+        /// This option takes precedence over `--only`.
+        skip: Vec<RuleSelector>,
+        /// A flag to know vcs integrated options such as `--staged` or `--changed` are enabled
+        vcs_targeted: VcsTargeted,
     },
     /// This mode is enabled when running the command `biome ci`
     CI {
         /// Whether the CI is running in a specific environment, e.g. GitHub, GitLab, etc.
         environment: Option<ExecutionEnvironment>,
+        /// A flag to know vcs integrated options such as `--staged` or `--changed` are enabled
+        vcs_targeted: VcsTargeted,
     },
     /// This mode is enabled when running the command `biome format`
     Format {
@@ -141,6 +165,8 @@ pub enum TraversalMode {
         /// 1. The virtual path to the file
         /// 2. The content of the file
         stdin: Option<Stdin>,
+        /// A flag to know vcs integrated options such as `--staged` or `--changed` are enabled
+        vcs_targeted: VcsTargeted,
     },
     /// This mode is enabled when running the command `biome migrate`
     Migrate {
@@ -180,21 +206,38 @@ impl Display for TraversalMode {
 }
 
 /// Tells to the execution of the traversal how the information should be reported
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum ReportMode {
     /// Reports information straight to the console, it's the default mode
-    #[default]
-    Terminal,
+    Terminal { with_summary: bool },
     /// Reports information in JSON format
     Json { pretty: bool },
+    /// Reports information for GitHub
+    GitHub,
+    /// JUnit output
+    /// Ref: https://github.com/testmoapp/junitxml?tab=readme-ov-file#basic-junit-xml-structure
+    Junit,
+}
+
+impl Default for ReportMode {
+    fn default() -> Self {
+        Self::Terminal {
+            with_summary: false,
+        }
+    }
 }
 
 impl From<CliReporter> for ReportMode {
     fn from(value: CliReporter) -> Self {
         match value {
-            CliReporter::Default => Self::Terminal,
+            CliReporter::Default => Self::Terminal {
+                with_summary: false,
+            },
+            CliReporter::Summary => Self::Terminal { with_summary: true },
             CliReporter::Json => Self::Json { pretty: false },
             CliReporter::JsonPretty => Self::Json { pretty: true },
+            CliReporter::GitHub => Self::GitHub,
+            CliReporter::Junit => Self::Junit,
         }
     }
 }
@@ -208,7 +251,7 @@ impl Execution {
         }
     }
 
-    pub(crate) fn new_ci() -> Self {
+    pub(crate) fn new_ci(vcs_targeted: VcsTargeted) -> Self {
         // Ref: https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
         let is_github = std::env::var("GITHUB_ACTIONS")
             .ok()
@@ -222,6 +265,7 @@ impl Execution {
                 } else {
                     None
                 },
+                vcs_targeted,
             },
             max_diagnostics: 20,
         }
@@ -266,13 +310,6 @@ impl Execution {
 
     pub(crate) const fn is_ci(&self) -> bool {
         matches!(self.traversal_mode, TraversalMode::CI { .. })
-    }
-
-    pub(crate) const fn is_ci_github(&self) -> bool {
-        if let TraversalMode::CI { environment } = &self.traversal_mode {
-            return matches!(environment, Some(ExecutionEnvironment::GitHub));
-        }
-        false
     }
 
     pub(crate) const fn is_check(&self) -> bool {
@@ -334,6 +371,16 @@ impl Execution {
             TraversalMode::CI { .. } | TraversalMode::Migrate { .. } => None,
         }
     }
+
+    pub(crate) fn is_vcs_targeted(&self) -> bool {
+        match &self.traversal_mode {
+            TraversalMode::Check { vcs_targeted, .. }
+            | TraversalMode::Lint { vcs_targeted, .. }
+            | TraversalMode::Format { vcs_targeted, .. }
+            | TraversalMode::CI { vcs_targeted, .. } => vcs_targeted.staged || vcs_targeted.changed,
+            TraversalMode::Migrate { .. } | TraversalMode::Search { .. } => false,
+        }
+    }
 }
 
 /// Based on the [mode](TraversalMode), the function might launch a traversal of the file system
@@ -378,21 +425,33 @@ pub fn execute_mode(
         let errors = summary_result.errors;
         let skipped = summary_result.skipped;
         let processed = summary_result.changed + summary_result.unchanged;
-
         let should_exit_on_warnings = summary_result.warnings > 0 && cli_options.error_on_warnings;
 
         match execution.report_mode {
-            ReportMode::Terminal => {
-                let reporter = ConsoleReporter {
-                    summary: summary_result,
-                    diagnostics_payload: DiagnosticsPayload {
-                        verbose: cli_options.verbose,
-                        diagnostic_level: cli_options.diagnostic_level,
-                        diagnostics,
-                    },
-                    execution: execution.clone(),
-                };
-                reporter.write(&mut ConsoleReporterVisitor(console))?;
+            ReportMode::Terminal { with_summary } => {
+                if with_summary {
+                    let reporter = SummaryReporter {
+                        summary: summary_result,
+                        diagnostics_payload: DiagnosticsPayload {
+                            verbose: cli_options.verbose,
+                            diagnostic_level: cli_options.diagnostic_level,
+                            diagnostics,
+                        },
+                        execution: execution.clone(),
+                    };
+                    reporter.write(&mut SummaryReporterVisitor(console))?;
+                } else {
+                    let reporter = ConsoleReporter {
+                        summary: summary_result,
+                        diagnostics_payload: DiagnosticsPayload {
+                            verbose: cli_options.verbose,
+                            diagnostic_level: cli_options.diagnostic_level,
+                            diagnostics,
+                        },
+                        execution: execution.clone(),
+                    };
+                    reporter.write(&mut ConsoleReporterVisitor(console))?;
+                }
             }
             ReportMode::Json { pretty } => {
                 console.error(markup!{
@@ -433,6 +492,29 @@ pub fn execute_mode(
                         {buffer}
                     });
                 }
+            }
+            ReportMode::GitHub => {
+                let reporter = GithubReporter {
+                    diagnostics_payload: DiagnosticsPayload {
+                        verbose: cli_options.verbose,
+                        diagnostic_level: cli_options.diagnostic_level,
+                        diagnostics,
+                    },
+                    execution: execution.clone(),
+                };
+                reporter.write(&mut GithubReporterVisitor(console))?;
+            }
+            ReportMode::Junit => {
+                let reporter = JunitReporter {
+                    summary: summary_result,
+                    diagnostics_payload: DiagnosticsPayload {
+                        verbose: cli_options.verbose,
+                        diagnostic_level: cli_options.diagnostic_level,
+                        diagnostics,
+                    },
+                    execution: execution.clone(),
+                };
+                reporter.write(&mut JunitReporterVisitor::new(console))?;
             }
         }
 

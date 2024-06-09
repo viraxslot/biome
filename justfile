@@ -21,7 +21,7 @@ upgrade-tools:
 # Generate all files across crates and tools. You rarely want to use it locally.
 gen-all:
   cargo run -p xtask_codegen -- all
-  cargo run -p xtask_codegen -- configuration
+  cargo codegen-configuration
   cargo run -p xtask_codegen --features configuration -- migrate-eslint
   just gen-bindings
   just format
@@ -38,10 +38,6 @@ gen-lint:
   cargo run -p xtask_codegen --features configuration -- migrate-eslint
   just gen-bindings
   just format
-
-# Generates code generated files for the website
-gen-web:
-  cargo codegen-website
 
 # Generates the initial files for all formatter crates
 gen-formatter:
@@ -148,6 +144,6 @@ new-changeset:
     knope document-change
 
 # Dry-run of the release
-new-dry-run-release *args='':
+dry-run-release *args='':
     knope release --dry-run {{args}}
 

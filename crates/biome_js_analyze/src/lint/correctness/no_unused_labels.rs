@@ -4,10 +4,9 @@ use biome_analyze::{
     RuleDiagnostic, RuleSource, ServiceBag, Visitor, VisitorContext,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{
-    AnyJsStatement, JsBreakStatement, JsContinueStatement, JsLabeledStatement, JsLanguage,
-    TextRange, WalkEvent,
+    AnyJsStatement, JsBreakStatement, JsContinueStatement, JsFileSource, JsLabeledStatement,
+    JsLanguage, TextRange, WalkEvent,
 };
 
 use biome_rowan::{AstNode, BatchMutationExt, Language, SyntaxNode, SyntaxResult, TokenText};
@@ -20,6 +19,8 @@ declare_rule! {
     /// Disallow unused labels.
     ///
     /// Labels that are declared and never used are most likely an error due to incomplete refactoring.
+    ///
+    /// The rule ignores reactive Svelte statements in Svelte components.
     ///
     /// ## Examples
     ///
@@ -51,12 +52,19 @@ declare_rule! {
     ///     return n;
     /// }
     /// ```
+    ///
+    /// ```svelte
+    /// <script>
+    /// $: { /* reactive block */ }
+    /// </script>
+    /// ```
     pub NoUnusedLabels {
         version: "1.0.0",
         name: "noUnusedLabels",
+        language: "js",
         sources: &[RuleSource::Eslint("no-unused-labels")],
         recommended: true,
-        fix_kind: FixKind::Unsafe,
+        fix_kind: FixKind::Safe,
     }
 }
 
@@ -155,7 +163,17 @@ impl Rule for NoUnusedLabels {
     type Signals = Option<Self::State>;
     type Options = ();
 
-    fn run(_: &RuleContext<Self>) -> Option<Self::State> {
+    fn run(ctx: &RuleContext<Self>) -> Option<Self::State> {
+        let label = ctx.query().label_token().ok()?;
+        let label = label.text_trimmed();
+        if label == "$"
+            && ctx
+                .source_type::<JsFileSource>()
+                .as_embedding_kind()
+                .is_svelte()
+        {
+            return None;
+        }
         Some(())
     }
 
@@ -177,12 +195,12 @@ impl Rule for NoUnusedLabels {
         let body = unused_label.body().ok()?;
         let mut mutation = ctx.root().begin();
         mutation.replace_node(unused_label.clone().into(), body);
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::Always,
-            message: markup! {"Remove the unused "<Emphasis>"label"</Emphasis>"."}.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! {"Remove the unused "<Emphasis>"label"</Emphasis>"."}.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

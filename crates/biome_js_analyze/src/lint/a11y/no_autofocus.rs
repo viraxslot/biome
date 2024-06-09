@@ -4,7 +4,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_syntax::{jsx_ext::AnyJsxElement, JsxAttribute};
 use biome_rowan::{AstNode, BatchMutationExt};
 
@@ -60,6 +59,7 @@ declare_rule! {
     pub NoAutofocus {
         version: "1.0.0",
         name: "noAutofocus",
+        language: "jsx",
         sources: &[RuleSource::EslintJsxA11y("no-autofocus")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -99,12 +99,11 @@ impl Rule for NoAutofocus {
             mutation.replace_token_discard_trivia(prev_token, new_token);
         }
         mutation.remove_node(attr.clone());
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove the "<Emphasis>"autoFocus"</Emphasis>" attribute." }
-                .to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove the "<Emphasis>"autoFocus"</Emphasis>" attribute." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

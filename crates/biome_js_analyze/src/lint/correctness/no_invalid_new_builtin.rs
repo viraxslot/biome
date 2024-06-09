@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic, RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     global_identifier, static_value::StaticValue, AnyJsExpression, JsCallExpression,
@@ -52,8 +51,12 @@ declare_rule! {
     pub NoInvalidNewBuiltin {
         version: "1.3.0",
         name: "noInvalidNewBuiltin",
+        language: "js",
+        // TODO: Remove this source once `useConsistentBuiltinInstantiation` is stable
         sources: &[RuleSource::Eslint("no-new-native-nonconstructor")],
         recommended: true,
+        // TODO: Deprecate this source once `useConsistentBuiltinInstantiation` is stable
+        //deprecated: "Use the rule useConsistentBuiltinInstantiation instead.",
         fix_kind: FixKind::Unsafe,
     }
 }
@@ -94,12 +97,12 @@ impl Rule for NoInvalidNewBuiltin {
             node.clone().into(),
             call_expression.into(),
         );
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Remove "<Emphasis>"new"</Emphasis>"." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Remove "<Emphasis>"new"</Emphasis>"." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

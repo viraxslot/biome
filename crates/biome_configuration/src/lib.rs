@@ -4,6 +4,7 @@
 //! by language. The language might further options divided by tool.
 pub mod css;
 pub mod diagnostics;
+pub mod editorconfig;
 pub mod formatter;
 pub mod generated;
 pub mod javascript;
@@ -13,9 +14,12 @@ pub mod organize_imports;
 mod overrides;
 pub mod vcs;
 
+use crate::css::CssLinter;
+pub use crate::diagnostics::BiomeDiagnostic;
 pub use crate::diagnostics::CantLoadExtendFile;
-pub use crate::diagnostics::ConfigurationDiagnostic;
 pub use crate::generated::push_to_analyzer_rules;
+use crate::javascript::JavascriptLinter;
+use crate::json::JsonLinter;
 use crate::organize_imports::{partial_organize_imports, OrganizeImports, PartialOrganizeImports};
 use crate::vcs::{partial_vcs_configuration, PartialVcsConfiguration, VcsConfiguration};
 use biome_deserialize::{Deserialized, StringSet};
@@ -39,7 +43,8 @@ pub use json::{
 };
 pub use linter::{
     partial_linter_configuration, LinterConfiguration, PartialLinterConfiguration,
-    RuleConfiguration, RulePlainConfiguration, RuleWithOptions, Rules,
+    RuleConfiguration, RuleFixConfiguration, RulePlainConfiguration, RuleWithFixOptions,
+    RuleWithOptions, Rules,
 };
 pub use overrides::{
     OverrideFormatterConfiguration, OverrideLinterConfiguration,
@@ -98,7 +103,7 @@ pub struct Configuration {
     pub json: JsonConfiguration,
 
     /// Specific configuration for the Css language
-    #[partial(type, bpaf(external(partial_css_configuration), optional, hide))]
+    #[partial(type, bpaf(external(partial_css_configuration), optional))]
     pub css: CssConfiguration,
 
     /// A list of paths to other JSON files, used to extends the current configuration.
@@ -153,6 +158,18 @@ impl PartialConfiguration {
             .unwrap_or_default()
     }
 
+    pub fn get_javascript_linter_configuration(&self) -> JavascriptLinter {
+        self.javascript
+            .as_ref()
+            .map(|f| {
+                f.linter
+                    .as_ref()
+                    .map(|f| f.get_linter_configuration())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_json_formatter_configuration(&self) -> JsonFormatter {
         self.json
             .as_ref()
@@ -160,6 +177,42 @@ impl PartialConfiguration {
                 f.formatter
                     .as_ref()
                     .map(|f| f.get_formatter_configuration())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_json_linter_configuration(&self) -> JsonLinter {
+        self.json
+            .as_ref()
+            .map(|f| {
+                f.linter
+                    .as_ref()
+                    .map(|f| f.get_linter_configuration())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_css_formatter_configuration(&self) -> CssFormatter {
+        self.css
+            .as_ref()
+            .map(|f| {
+                f.formatter
+                    .as_ref()
+                    .map(|f| f.get_formatter_configuration())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_css_linter_configuration(&self) -> CssLinter {
+        self.css
+            .as_ref()
+            .map(|f| {
+                f.linter
+                    .as_ref()
+                    .map(|f| f.get_linter_configuration())
                     .unwrap_or_default()
             })
             .unwrap_or_default()
@@ -237,12 +290,18 @@ pub struct ConfigurationPayload {
     pub external_resolution_base_path: PathBuf,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub enum ConfigurationPathHint {
     /// The default mode, not having a configuration file is not an error.
     /// The path will be filled with the working directory if it is not filled at the time of usage.
     #[default]
     None,
+
+    /// Very similar to [ConfigurationPathHint::None]. However, the path provided by this variant
+    /// will be used as **working directory**, which means that all globs defined in the configuration
+    /// will use **this path** as base path.
+    FromWorkspace(PathBuf),
+
     /// The configuration path provided by the LSP, not having a configuration file is not an error.
     /// The path will always be a directory path.
     FromLsp(PathBuf),
@@ -296,7 +355,7 @@ mod test {
             Test {},
             ResolveOptions {
                 condition_names: vec!["node".to_string(), "import".to_string()],
-                extensions: vec!["*.json".to_string()],
+                extensions: vec![".json".to_string()],
                 ..ResolveOptions::default()
             },
         );

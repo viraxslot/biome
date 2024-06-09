@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, FixKind, Rule, RuleDiagnostic,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make::{js_literal_member_name, js_property_object_member};
 use biome_js_semantic::{Reference, ReferencesExtensions};
 use biome_js_syntax::{
@@ -47,6 +46,7 @@ declare_rule! {
     pub NoShoutyConstants {
         version: "1.0.0",
         name: "noShoutyConstants",
+        language: "js",
         recommended: false,
         fix_kind: FixKind::Unsafe,
     }
@@ -190,11 +190,11 @@ impl Rule for NoShoutyConstants {
             return None;
         }
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Use the constant value directly" }.to_owned(),
-            mutation: batch,
-        })
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Use the constant value directly" }.to_owned(),
+            batch,
+        ))
     }
 }

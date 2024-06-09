@@ -3,7 +3,6 @@ use biome_analyze::{
     RuleSource,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     JsSyntaxKind, JsSyntaxToken, JsVariableDeclarationFields, JsVariableStatement,
@@ -44,6 +43,7 @@ declare_rule! {
     pub UseSingleVarDeclarator {
         version: "1.0.0",
         name: "useSingleVarDeclarator",
+        language: "js",
         sources: &[RuleSource::Eslint("one-var")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -202,11 +202,11 @@ impl Rule for UseSingleVarDeclarator {
         let mut mutation = ctx.root().begin();
         mutation.replace_element(prev_parent.into(), next_parent.into());
 
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Break out into multiple declarations" }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Break out into multiple declarations" }.to_owned(),
             mutation,
-        })
+        ))
     }
 }

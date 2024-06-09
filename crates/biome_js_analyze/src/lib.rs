@@ -1,6 +1,6 @@
 #![warn(clippy::needless_pass_by_value)]
 
-use crate::suppression_action::apply_suppression_comment;
+use crate::suppression_action::JsSuppressionAction;
 use biome_analyze::{
     AnalysisFilter, Analyzer, AnalyzerContext, AnalyzerOptions, AnalyzerSignal, ControlFlow,
     InspectMatcher, LanguageRoot, MatchQueryParams, MetadataRegistry, RuleAction, RuleRegistry,
@@ -94,7 +94,11 @@ where
                 } else {
                     let category = key.name();
                     if let Some(rule) = category.strip_prefix("lint/") {
-                        result.push(Ok(SuppressionKind::Rule(rule)));
+                        if let Some(instance) = value {
+                            result.push(Ok(SuppressionKind::RuleInstance(rule, instance)));
+                        } else {
+                            result.push(Ok(SuppressionKind::Rule(rule)));
+                        }
                     }
                 }
             }
@@ -117,7 +121,7 @@ where
         metadata(),
         InspectMatcher::new(registry, inspect_matcher),
         parse_linter_suppression_comment,
-        apply_suppression_comment,
+        Box::new(JsSuppressionAction),
         &mut emit_signal,
     );
 
@@ -252,7 +256,7 @@ mod tests {
             String::from_utf8(buffer).unwrap()
         }
 
-        const SOURCE: &str = r#"foo(<>{bar}</>);"#;
+        const SOURCE: &str = r#"<div class={`px-2 foo p-4 bar ${variable}`}/>"#;
 
         let parsed = parse(SOURCE, JsFileSource::tsx(), JsParserOptions::default());
 
@@ -264,11 +268,11 @@ mod tests {
             dependencies_index: Some(1),
             stable_result: StableHookResult::None,
         };
-        let rule_filter = RuleFilter::Rule("complexity", "noUselessFragments");
+        let rule_filter = RuleFilter::Rule("nursery", "useSortedClasses");
 
         options.configuration.rules.push_rule(
             RuleKey::new("nursery", "useHookAtTopLevel"),
-            RuleOptions::new(HooksOptions { hooks: vec![hook] }),
+            RuleOptions::new(HooksOptions { hooks: vec![hook] }, None),
         );
 
         analyze(

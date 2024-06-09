@@ -1,4 +1,6 @@
-use biome_formatter::{FormatResult, Formatted, IndentStyle, LineEnding, LineWidth, Printed};
+use biome_formatter::{
+    FormatResult, Formatted, IndentStyle, IndentWidth, LineEnding, LineWidth, Printed,
+};
 use biome_formatter_test::TestFormatLanguage;
 use biome_json_formatter::context::{JsonFormatContext, JsonFormatOptions};
 use biome_json_formatter::{format_node, format_range, JsonFormatLanguage};
@@ -6,7 +8,7 @@ use biome_json_parser::{parse_json, JsonParserOptions};
 use biome_json_syntax::{JsonFileSource, JsonLanguage};
 use biome_parser::AnyParse;
 use biome_rowan::{SyntaxNode, TextRange};
-use biome_service::settings::{ServiceLanguage, WorkspaceSettings};
+use biome_service::settings::{ServiceLanguage, Settings};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
@@ -27,7 +29,7 @@ impl TestFormatLanguage for JsonTestFormatLanguage {
 
     fn to_language_settings<'a>(
         &self,
-        settings: &'a WorkspaceSettings,
+        settings: &'a Settings,
     ) -> &'a <Self::ServiceLanguage as ServiceLanguage>::FormatterSettings {
         &settings.languages.json.formatter
     }
@@ -112,7 +114,11 @@ impl From<JsonSerializableFormatOptions> for JsonFormatOptions {
     fn from(test: JsonSerializableFormatOptions) -> Self {
         JsonFormatOptions::default()
             .with_indent_style(test.indent_style.map(Into::into).unwrap_or_default())
-            .with_indent_width(test.indent_width.map(Into::into).unwrap_or_default())
+            .with_indent_width(
+                test.indent_width
+                    .and_then(|width| IndentWidth::try_from(width).ok())
+                    .unwrap_or_default(),
+            )
             .with_line_width(
                 test.line_width
                     .and_then(|width| LineWidth::try_from(width).ok())

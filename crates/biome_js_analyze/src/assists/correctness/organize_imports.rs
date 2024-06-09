@@ -4,7 +4,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, Ast, FixKind, Rule, SourceActionKind,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::{
     AnyJsImportClause, AnyJsModuleItem, AnyJsNamedImportSpecifier, JsImport, JsLanguage, JsModule,
@@ -44,6 +43,7 @@ declare_rule! {
     pub OrganizeImports {
         version: "1.0.0",
         name: "organizeImports",
+        language: "js",
         recommended: false,
         fix_kind: FixKind::Unsafe,
     }
@@ -72,6 +72,30 @@ impl Rule for OrganizeImports {
                 }
                 continue;
             };
+
+            let is_side_effect_import = matches!(
+                import.import_clause(),
+                Ok(AnyJsImportClause::JsImportBareClause(_))
+            );
+            if is_side_effect_import {
+                if let Some(first_node) = first_node.take() {
+                    groups.push(ImportGroup {
+                        first_node,
+                        nodes: take(&mut nodes),
+                    });
+                }
+                // A side effect import creates its own import group
+                let mut nodes = BTreeMap::new();
+                nodes.insert(
+                    ImportKey(import.source_text().ok()?),
+                    vec![ImportNode::from(import.clone())],
+                );
+                groups.push(ImportGroup {
+                    first_node: import.clone(),
+                    nodes,
+                });
+                continue;
+            }
 
             // If this is not the first import in the group, check for a group break
             if has_empty_line(&import.import_token().ok()?.leading_trivia()) {
@@ -235,12 +259,12 @@ impl Rule for OrganizeImports {
         let mut mutation = ctx.root().begin();
         mutation.replace_node_discard_trivia(old_list, new_list);
 
-        Some(JsRuleAction {
-            category: ActionCategory::Source(SourceActionKind::OrganizeImports),
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Organize Imports (Biome)" }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::Source(SourceActionKind::OrganizeImports),
+            ctx.metadata().applicability(),
+            markup! { "Organize Imports (Biome)" },
             mutation,
-        })
+        ))
     }
 }
 
@@ -424,7 +448,14 @@ impl ImportNode {
                     // If the node we're attaching this separator to has no trailing trivia, just create a simple comma token
                     let last_trailing_trivia = match node.syntax().last_trailing_trivia() {
                         Some(trivia) if !trivia.is_empty() => trivia,
-                        _ => return make::token(T![,]),
+                        _ => {
+                            let sep = make::token(T![,]);
+                            return if node.syntax().has_leading_newline() {
+                                sep
+                            } else {
+                                sep.with_trailing_trivia([(TriviaPieceKind::Whitespace, " ")])
+                            };
+                        }
                     };
 
                     // Otherwise we need to clone the trailing trivia from the node to the separator

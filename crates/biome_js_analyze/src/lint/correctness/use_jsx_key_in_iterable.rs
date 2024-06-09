@@ -6,10 +6,10 @@ use biome_console::markup;
 use biome_js_semantic::SemanticModel;
 use biome_js_syntax::{
     AnyJsExpression, AnyJsFunctionBody, AnyJsMemberExpression, AnyJsObjectMember, AnyJsxAttribute,
-    AnyJsxTag, JsArrayExpression, JsCallExpression, JsObjectExpression, JsxAttributeList,
-    JsxExpressionChild, JsxTagExpression,
+    AnyJsxChild, JsArrayExpression, JsCallExpression, JsFunctionBody, JsObjectExpression,
+    JsxAttributeList, JsxExpressionChild, JsxTagExpression,
 };
-use biome_rowan::{declare_node_union, AstNode, AstSeparatedList, TextRange};
+use biome_rowan::{declare_node_union, AstNode, AstNodeList, AstSeparatedList, TextRange};
 
 declare_rule! {
     /// Disallow missing key props in iterators/collection literals.
@@ -38,6 +38,7 @@ declare_rule! {
     pub UseJsxKeyInIterable {
         version: "1.6.0",
         name: "useJsxKeyInIterable",
+        language: "jsx",
         sources: &[RuleSource::EslintReact("jsx-key")],
         source_kind: RuleSourceKind::SameLogic,
         recommended: true,
@@ -52,15 +53,9 @@ declare_node_union! {
     pub ReactComponentExpression = JsxTagExpression | JsCallExpression
 }
 
-#[derive(Debug)]
-pub enum UseJsxKeyInIterableState {
-    MissingKeyProps(TextRange),
-    CantDetermineJSXProp(TextRange),
-}
-
 impl Rule for UseJsxKeyInIterable {
     type Query = Semantic<UseJsxKeyInIterableQuery>;
-    type State = UseJsxKeyInIterableState;
+    type State = TextRange;
     type Signals = Vec<Self::State>;
     type Options = ();
 
@@ -77,38 +72,19 @@ impl Rule for UseJsxKeyInIterable {
     }
 
     fn diagnostic(_: &RuleContext<Self>, state: &Self::State) -> Option<RuleDiagnostic> {
-        match state {
-            UseJsxKeyInIterableState::MissingKeyProps(state) => {
-                let diagnostic = RuleDiagnostic::new(
-                    rule_category!(),
-                    state,
-                    markup! {
-                        "Missing "<Emphasis>"key"</Emphasis>" property for this element in iterable."
-                    },
-                )
-                .note(markup! {
-                    "The order of the items may change, and having a key can help React identify which item was moved."
-                }).note(markup! {
-                    "Check the "<Hyperlink href="https://react.dev/learn/rendering-lists#why-does-react-need-keys">"React documentation"</Hyperlink>". "
-                });
-                Some(diagnostic)
-            }
-            UseJsxKeyInIterableState::CantDetermineJSXProp(state) => {
-                let diagnostic = RuleDiagnostic::new(
-                    rule_category!(),
-                    state,
-                    markup! {
-                        "Cannot determine whether this child has the required "<Emphasis>"key"</Emphasis>" prop."
-                    },
-                )
-                .note(markup! {
-                    "Either return a JSX expression, or suppress this instance if you determine it is safe."
-                }).note(markup! {
-                    "Check the "<Hyperlink href="https://react.dev/learn/rendering-lists#why-does-react-need-keys">"React documentation for why a key prop is required"</Hyperlink>". "
-                });
-                Some(diagnostic)
-            }
-        }
+        let diagnostic = RuleDiagnostic::new(
+            rule_category!(),
+            state,
+            markup! {
+                "Missing "<Emphasis>"key"</Emphasis>" property for this element in iterable."
+            },
+        )
+        .note(markup! {
+            "The order of the items may change, and having a key can help React identify which item was moved."
+        }).note(markup! {
+            "Check the "<Hyperlink href="https://react.dev/learn/rendering-lists#why-does-react-need-keys">"React documentation"</Hyperlink>". "
+        });
+        Some(diagnostic)
     }
 }
 
@@ -119,10 +95,7 @@ impl Rule for UseJsxKeyInIterable {
 /// ```js
 /// [<h1></h1>, <h1></h1>]
 /// ```
-fn handle_collections(
-    node: &JsArrayExpression,
-    model: &SemanticModel,
-) -> Vec<UseJsxKeyInIterableState> {
+fn handle_collections(node: &JsArrayExpression, model: &SemanticModel) -> Vec<TextRange> {
     let is_inside_jsx = node.parent::<JsxExpressionChild>().is_some();
     node.elements()
         .iter()
@@ -133,6 +106,7 @@ fn handle_collections(
             let node = AnyJsExpression::cast(node.into_syntax())?;
             handle_potential_react_component(node, model, is_inside_jsx)
         })
+        .flatten()
         .collect()
 }
 
@@ -143,10 +117,7 @@ fn handle_collections(
 /// ```js
 /// data.map(x => <h1>{x}</h1>)
 /// ```
-fn handle_iterators(
-    node: &JsCallExpression,
-    model: &SemanticModel,
-) -> Option<Vec<UseJsxKeyInIterableState>> {
+fn handle_iterators(node: &JsCallExpression, model: &SemanticModel) -> Option<Vec<TextRange>> {
     let callee = node.callee().ok()?;
     let member_expression = AnyJsMemberExpression::cast(callee.into_syntax())?;
     let arguments = node.arguments().ok()?;
@@ -190,36 +161,16 @@ fn handle_iterators(
     match callback_argument {
         AnyJsExpression::JsFunctionExpression(callback) => {
             let body = callback.body().ok()?;
-            let res = body
-                .statements()
-                .into_iter()
-                .filter_map(|statement| {
-                    let statement = statement.as_js_return_statement()?;
-                    let returned_value = statement.argument()?;
-                    handle_potential_react_component(returned_value, model, is_inside_jsx)
-                })
-                .collect::<Vec<_>>();
-
-            Some(res)
+            Some(handle_function_body(&body, model, is_inside_jsx))
         }
         AnyJsExpression::JsArrowFunctionExpression(callback) => {
             let body = callback.body().ok()?;
             match body {
                 AnyJsFunctionBody::AnyJsExpression(expr) => {
                     handle_potential_react_component(expr, model, is_inside_jsx)
-                        .map(|state| vec![state])
                 }
                 AnyJsFunctionBody::JsFunctionBody(body) => {
-                    let res = body
-                        .statements()
-                        .into_iter()
-                        .filter_map(|statement| {
-                            let statement = statement.as_js_return_statement()?;
-                            let returned_value = statement.argument()?;
-                            handle_potential_react_component(returned_value, model, is_inside_jsx)
-                        })
-                        .collect::<Vec<_>>();
-                    Some(res)
+                    Some(handle_function_body(&body, model, is_inside_jsx))
                 }
             }
         }
@@ -227,33 +178,106 @@ fn handle_iterators(
     }
 }
 
+/// Inspects each statement for variable declarations and return statements to find potential React components.
+fn handle_function_body(
+    node: &JsFunctionBody,
+    model: &SemanticModel,
+    is_inside_jsx: bool,
+) -> Vec<TextRange> {
+    // if the return statement definitely has a key prop, don't need to check the rest of the function
+    let return_statement = node
+        .statements()
+        .iter()
+        .find_map(|statement| statement.as_js_return_statement().cloned());
+    let is_return_component = return_statement
+        .as_ref()
+        .and_then(|ret| {
+            let returned_value = ret.argument()?;
+            Some(ReactComponentExpression::can_cast(
+                returned_value.syntax().kind(),
+            ))
+        })
+        .unwrap_or_default();
+    let ranges = return_statement.and_then(|ret| {
+        let returned_value = ret.argument()?;
+        handle_potential_react_component(returned_value, model, is_inside_jsx)
+    });
+    if ranges.is_none() && is_return_component {
+        return vec![];
+    }
+
+    node.statements()
+        .iter()
+        .filter_map(|statement| {
+            if let Some(statement) = statement.as_js_variable_statement() {
+                let declaration = statement.declaration().ok()?;
+                Some(
+                    declaration
+                        .declarators()
+                        .iter()
+                        .filter_map(|declarator| {
+                            let decl = declarator.ok()?;
+                            let init = decl.initializer()?.expression().ok()?;
+                            handle_potential_react_component(init, model, is_inside_jsx)
+                        })
+                        .flatten()
+                        .collect(),
+                )
+            } else if let Some(statement) = statement.as_js_return_statement() {
+                let returned_value = statement.argument()?;
+                handle_potential_react_component(returned_value, model, is_inside_jsx)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect()
+}
+
 fn handle_potential_react_component(
     node: AnyJsExpression,
     model: &SemanticModel,
     is_inside_jsx: bool,
-) -> Option<UseJsxKeyInIterableState> {
+) -> Option<Vec<TextRange>> {
     let node = unwrap_parenthesis(node)?;
+
+    if let AnyJsExpression::JsConditionalExpression(node) = node {
+        let consequent =
+            handle_potential_react_component(node.consequent().ok()?, model, is_inside_jsx);
+        let alternate =
+            handle_potential_react_component(node.alternate().ok()?, model, is_inside_jsx);
+
+        return match (consequent, alternate) {
+            (Some(consequent), Some(alternate)) => Some([consequent, alternate].concat()),
+            (Some(consequent), None) => Some(consequent),
+            (None, Some(alternate)) => Some(alternate),
+            (None, None) => None,
+        };
+    }
+
     if is_inside_jsx {
         if let Some(node) = ReactComponentExpression::cast_ref(node.syntax()) {
             let range = handle_react_component(node, model)?;
-            Some(UseJsxKeyInIterableState::MissingKeyProps(range))
+            Some(range)
         } else {
-            Some(UseJsxKeyInIterableState::CantDetermineJSXProp(node.range()))
+            None
         }
     } else {
         let range =
             handle_react_component(ReactComponentExpression::cast_ref(node.syntax())?, model)?;
-        Some(UseJsxKeyInIterableState::MissingKeyProps(range))
+        Some(range)
     }
 }
 
 fn handle_react_component(
     node: ReactComponentExpression,
     model: &SemanticModel,
-) -> Option<TextRange> {
+) -> Option<Vec<TextRange>> {
     match node {
-        ReactComponentExpression::JsxTagExpression(node) => handle_jsx_tag(&node),
-        ReactComponentExpression::JsCallExpression(node) => handle_react_non_jsx(&node, model),
+        ReactComponentExpression::JsxTagExpression(node) => handle_jsx_tag(&node, model),
+        ReactComponentExpression::JsCallExpression(node) => {
+            handle_react_non_jsx(&node, model).map(|r| vec![r])
+        }
     }
 }
 
@@ -264,25 +288,60 @@ fn handle_react_component(
 /// ```js
 /// <Hello></Hello>
 /// ```
-fn handle_jsx_tag(node: &JsxTagExpression) -> Option<TextRange> {
+fn handle_jsx_tag(node: &JsxTagExpression, model: &SemanticModel) -> Option<Vec<TextRange>> {
     let tag = node.tag().ok()?;
-    match tag {
-        AnyJsxTag::JsxElement(node) => {
-            let open_node = node.opening_element().ok()?;
-            if !has_key_attribute(&open_node.attributes()) {
-                Some(open_node.range())
-            } else {
-                None
+    let tag = AnyJsxChild::cast_ref(tag.syntax())?;
+    handle_jsx_child(&tag, model)
+}
+
+fn handle_jsx_child(node: &AnyJsxChild, model: &SemanticModel) -> Option<Vec<TextRange>> {
+    let mut stack: Vec<AnyJsxChild> = vec![node.clone()];
+    let mut ranges: Vec<TextRange> = vec![];
+
+    while let Some(current) = stack.pop() {
+        match current {
+            AnyJsxChild::JsxElement(node) => {
+                let open_node = node.opening_element().ok()?;
+                if !has_key_attribute(&open_node.attributes()) {
+                    ranges.push(open_node.range());
+                }
             }
-        }
-        AnyJsxTag::JsxSelfClosingElement(node) => {
-            if !has_key_attribute(&node.attributes()) {
-                Some(node.range())
-            } else {
-                None
+            AnyJsxChild::JsxSelfClosingElement(node) => {
+                if !has_key_attribute(&node.attributes()) {
+                    ranges.push(node.range());
+                }
             }
+            AnyJsxChild::JsxExpressionChild(node) => {
+                let expr = node.expression()?;
+                if let Some(child_ranges) = handle_potential_react_component(expr, model, true) {
+                    ranges.extend(child_ranges);
+                }
+            }
+            AnyJsxChild::JsxFragment(node) => {
+                let has_any_tags = node.children().iter().any(|child| match &child {
+                    AnyJsxChild::JsxElement(_) | AnyJsxChild::JsxSelfClosingElement(_) => true,
+                    // HACK: don't flag the entire fragment if there's a conditional expression
+                    AnyJsxChild::JsxExpressionChild(node) => node
+                        .expression()
+                        .map_or(false, |n| n.as_js_conditional_expression().is_some()),
+                    _ => false,
+                });
+
+                if !has_any_tags {
+                    ranges.push(node.range());
+                    break;
+                }
+
+                stack.extend(node.children());
+            }
+            _ => {}
         }
-        AnyJsxTag::JsxFragment(node) => Some(node.range()),
+    }
+
+    if ranges.is_empty() {
+        None
+    } else {
+        Some(ranges)
     }
 }
 

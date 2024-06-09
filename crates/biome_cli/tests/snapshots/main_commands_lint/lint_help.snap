@@ -7,7 +7,8 @@ expression: content
 ```block
 Run various checks on a set of files.
 
-Usage: lint [--apply] [--apply-unsafe] [--staged] [--changed] [--since=REF] [PATH]...
+Usage: lint [--write] [--unsafe] [--only=<GROUP|RULE>]... [--skip=<GROUP|RULE>]... [--staged] [--changed
+] [--since=REF] [PATH]...
 
 Set of properties to integrate Biome with a VCS software.
         --vcs-client-kind=<git>  The kind of client.
@@ -27,6 +28,13 @@ The configuration of the filesystem
         --files-ignore-unknown=<true|false>  Tells Biome to not emit diagnostics when handling files
                               that doesn't know
 
+Linter options specific to the JavaScript linter
+        --javascript-linter-enabled=<true|false>  Control the linter for JavaScript (and its super languages)
+                              files.
+
+Linter options specific to the JSON linter
+        --json-linter-enabled=<true|false>  Control the linter for JSON (and its super languages) files.
+
 Global options applied to all commands
         --colors=<off|force>  Set the formatting mode for markup: "off" prints everything as plain text,
                               "force" forces the formatting of markup using ANSI even if the console
@@ -42,7 +50,7 @@ Global options applied to all commands
         --no-errors-on-unmatched  Silence errors that would be emitted in case no files were processed
                               during the execution of the command.
         --error-on-warnings   Tell Biome to exit with an error code if some diagnostics emit warnings.
-        --reporter=<json|json-pretty>  Allows to change how diagnostics and summary are reported.
+        --reporter=<json|json-pretty|summary>  Allows to change how diagnostics and summary are reported.
         --log-level=<none|debug|info|warn|error>  The level of logging. In order, from the most verbose
                               to the least verbose: debug, info, warn, error.
                               The value `none` won't show any logging.
@@ -58,8 +66,19 @@ Available positional items:
     PATH                      Single file, single path or list of paths
 
 Available options:
-        --apply               Apply safe fixes, formatting and import sorting
-        --apply-unsafe        Apply safe fixes and unsafe fixes, formatting and import sorting
+        --write               Writes safe fixes
+        --unsafe              Allow to do unsafe fixes, should be used with `--write` or `--fix`
+        --fix                 Alias for `--write`, writes safe fixes
+        --apply               Alias for `--write`, writes safe fixes (deprecated, use `--write`)
+        --apply-unsafe        Alias for `--write --unsafe`, writes safe and unsafe fixes (deprecated,
+                              use `--write --unsafe`)
+        --only=<GROUP|RULE>   Run only the given rule or group of rules. If the severity level of a rule
+                              is `off`, then the severity level of the rule is set to `error` if it is
+                              a recommended rule or `warn` otherwise.
+                              Example: `biome lint --only=correctness/noUnusedVariables --only=suspicious`
+        --skip=<GROUP|RULE>   Skip the given rule or group of rules by setting the severity level of
+                              the rules to `off`. This option takes precedence over `--only`.
+                              Example: `biome lint --skip=correctness/noUnusedVariables --skip=suspicious`
         --stdin-file-path=PATH  Use this option when you want to format code piped from `stdin`, and
                               print the output to `stdout`.
                               The file doesn't need to exist on disk, what matters is the extension of

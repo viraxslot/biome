@@ -14,11 +14,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Deserialize, Eq, Partial, PartialEq, Serialize)]
 #[partial(derive(Bpaf, Clone, Deserializable, Eq, Merge, PartialEq))]
 #[partial(cfg_attr(feature = "schema", derive(schemars::JsonSchema)))]
-#[partial(serde(default, deny_unknown_fields))]
+#[partial(serde(rename_all = "camelCase", default, deny_unknown_fields))]
 pub struct JavascriptConfiguration {
     /// Formatting options
     #[partial(type, bpaf(external(partial_javascript_formatter), optional))]
     pub formatter: JavascriptFormatter,
+
+    /// Linter options
+    #[partial(type, bpaf(external(partial_javascript_linter), optional))]
+    pub linter: JavascriptLinter,
 
     /// Parsing options
     #[partial(type, bpaf(external(partial_javascript_parser), optional))]
@@ -62,6 +66,7 @@ pub struct JavascriptParser {
     Bpaf, Clone, Copy, Debug, Default, Deserialize, Deserializable, Eq, Merge, PartialEq, Serialize,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub enum JsxRuntime {
     /// Indicates a modern or native JSX environment, that doesn't require
     /// special handling by Biome.
@@ -87,6 +92,31 @@ impl FromStr for JsxRuntime {
             "transparent" => Ok(Self::Transparent),
             "react-classic" | "reactClassic" => Ok(Self::ReactClassic),
             _ => Err("Unexpected value".to_string()),
+        }
+    }
+}
+
+/// Linter options specific to the JavaScript linter
+#[derive(Clone, Debug, Deserialize, Eq, Partial, PartialEq, Serialize)]
+#[partial(derive(Bpaf, Clone, Deserializable, Eq, Merge, PartialEq))]
+#[partial(cfg_attr(feature = "schema", derive(schemars::JsonSchema)))]
+#[partial(serde(rename_all = "camelCase", default, deny_unknown_fields))]
+pub struct JavascriptLinter {
+    /// Control the linter for JavaScript (and its super languages) files.
+    #[partial(bpaf(long("javascript-linter-enabled"), argument("true|false"), optional))]
+    pub enabled: bool,
+}
+
+impl Default for JavascriptLinter {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl PartialJavascriptLinter {
+    pub fn get_linter_configuration(&self) -> JavascriptLinter {
+        JavascriptLinter {
+            enabled: self.enabled.unwrap_or_default(),
         }
     }
 }

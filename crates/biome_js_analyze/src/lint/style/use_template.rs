@@ -3,7 +3,6 @@ use biome_analyze::{
     context::RuleContext, declare_rule, ActionCategory, Ast, FixKind, Rule, RuleDiagnostic,
 };
 use biome_console::markup;
-use biome_diagnostics::Applicability;
 use biome_js_factory::make;
 use biome_js_syntax::AnyJsTemplateElement;
 use biome_js_syntax::{
@@ -50,6 +49,7 @@ declare_rule! {
     pub UseTemplate {
         version: "1.0.0",
         name: "useTemplate",
+        language: "js",
         sources: &[RuleSource::Eslint("prefer-template")],
         recommended: true,
         fix_kind: FixKind::Unsafe,
@@ -97,12 +97,12 @@ impl Rule for UseTemplate {
             AnyJsExpression::JsBinaryExpression(node.clone()),
             AnyJsExpression::JsTemplateExpression(template),
         );
-        Some(JsRuleAction {
-            category: ActionCategory::QuickFix,
-            applicability: Applicability::MaybeIncorrect,
-            message: markup! { "Use a "<Emphasis>"template literal"</Emphasis>"." }.to_owned(),
+        Some(JsRuleAction::new(
+            ActionCategory::QuickFix,
+            ctx.metadata().applicability(),
+            markup! { "Use a "<Emphasis>"template literal"</Emphasis>"." }.to_owned(),
             mutation,
-        })
+        ))
     }
 }
 

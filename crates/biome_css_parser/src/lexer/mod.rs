@@ -8,6 +8,7 @@ use biome_parser::diagnostic::ParseDiagnostic;
 use biome_parser::lexer::{
     LexContext, Lexer, LexerCheckpoint, LexerWithCheckpoint, ReLexer, TokenFlags,
 };
+use biome_rowan::SyntaxKind;
 use biome_unicode_table::{
     is_css_id_continue, is_css_id_start, lookup_byte, Dispatch, Dispatch::*,
 };
@@ -76,7 +77,7 @@ pub(crate) struct CssLexer<'src> {
 
     diagnostics: Vec<ParseDiagnostic>,
 
-    config: CssParserOptions,
+    options: CssParserOptions,
 }
 
 impl<'src> Lexer<'src> for CssLexer<'src> {
@@ -196,12 +197,12 @@ impl<'src> CssLexer<'src> {
             current_flags: TokenFlags::empty(),
             position: 0,
             diagnostics: vec![],
-            config: CssParserOptions::default(),
+            options: CssParserOptions::default(),
         }
     }
 
-    pub(crate) fn with_config(self, config: CssParserOptions) -> Self {
-        Self { config, ..self }
+    pub(crate) fn with_options(self, options: CssParserOptions) -> Self {
+        Self { options, ..self }
     }
 
     /// Bumps the current byte and creates a lexed token of the passed in kind
@@ -375,8 +376,10 @@ impl<'src> CssLexer<'src> {
     }
 
     fn consume_selector_token(&mut self, current: u8) -> CssSyntaxKind {
-        match current {
-            b' ' => self.consume_byte(CSS_SPACE_LITERAL),
+        let dispatched = lookup_byte(current);
+
+        match dispatched {
+            WHS => self.consume_byte(CSS_SPACE_LITERAL),
             _ => self.consume_token(current),
         }
     }
@@ -485,7 +488,7 @@ impl<'src> CssLexer<'src> {
                 WHS if matches!(chr, b'\n' | b'\r') => {
                     let unterminated =
                         ParseDiagnostic::new("Missing closing quote", start..self.text_position())
-                            .with_detail(self.position..self.position + 1, "line breaks here");
+                            .with_hint("The closing quote must be on the same line.");
 
                     self.diagnostics.push(unterminated);
 
@@ -568,15 +571,21 @@ impl<'src> CssLexer<'src> {
         // While the next input code point is a digit, consume it.
         self.consume_number_sequence();
 
-        // If the next 2 input code points are U+002E FULL STOP (.) followed by a digit...
-        if matches!(self.current_byte(), Some(b'.'))
-            && self.peek_byte().map_or(false, |byte| byte.is_ascii_digit())
-        {
-            // Consume them.
-            self.advance(2);
+        // According to the spec if the next 2 input code points are U+002E FULL STOP (.) followed by a digit we need to consume them.
+        // However we want to parse numbers like `1.` and `1.e10` where we don't have a number after (.)
+        // If the next input code points are U+002E FULL STOP (.)...
+        if matches!(self.current_byte(), Some(b'.')) {
+            // Consume it.
+            self.advance(1);
 
-            // While the next input code point is a digit, consume it.
-            self.consume_number_sequence()
+            // U+002E FULL STOP (.) followed by a digit...
+            if self
+                .current_byte()
+                .map_or(false, |byte| byte.is_ascii_digit())
+            {
+                // While the next input code point is a digit, consume it.
+                self.consume_number_sequence();
+            }
         }
 
         // If the next 2 or 3 input code points are U+0045 LATIN CAPITAL LETTER E (E) or
@@ -836,6 +845,9 @@ impl<'src> CssLexer<'src> {
             b"domain" => DOMAIN_KW,
             b"media-document" => MEDIA_DOCUMENT_KW,
             b"regexp" => REGEXP_KW,
+            b"value" => VALUE_KW,
+            b"as" => AS_KW,
+            b"composes" => COMPOSES_KW,
             _ => IDENT,
         }
     }
@@ -1023,7 +1035,7 @@ impl<'src> CssLexer<'src> {
                     COMMENT
                 }
             }
-            Some(b'/') if self.config.allow_wrong_line_comments => {
+            Some(b'/') if self.options.allow_wrong_line_comments => {
                 self.advance(2);
 
                 while let Some(chr) = self.current_byte() {
